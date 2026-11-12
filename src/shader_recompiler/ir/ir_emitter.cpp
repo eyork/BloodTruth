@@ -102,6 +102,31 @@ void IREmitter::Discard(const U1& cond) {
     Inst(Opcode::DiscardCond, cond);
 }
 
+void IREmitter::PredicatedBegin(const U1& cond) {
+    Inst(Opcode::PredicatedBegin, cond);
+}
+
+void IREmitter::PredicatedEnd() {
+    Inst(Opcode::PredicatedEnd);
+}
+
+Value IREmitter::PredicatedEnd(const Value& value) {
+    switch (value.Type()) {
+    case Type::U32:
+        return Inst(Opcode::PredicatedEndU32, value);
+    case Type::U64:
+        return Inst(Opcode::PredicatedEndU64, value);
+    case Type::F32:
+        return Inst(Opcode::PredicatedEndF32, value);
+    default:
+        UNREACHABLE_MSG("PredicatedEnd of type {}", value.Type());
+    }
+}
+
+void IREmitter::LdsBarrier() {
+    Inst(Opcode::LdsBarrier);
+}
+
 void IREmitter::Barrier() {
     Inst(Opcode::Barrier);
 }
@@ -187,6 +212,8 @@ U1 IREmitter::Condition(IR::Condition cond) {
         return LogicalNot(GetExec());
     case IR::Condition::Execnz:
         return GetExec();
+    case IR::Condition::ExeczWave:
+        return LogicalNot(GroupAny(GetExec()));
     default:
         UNREACHABLE_MSG("");
     }
@@ -661,8 +688,8 @@ U32 IREmitter::ShuffleXor(const U32& value, const U32& mask) {
     return Inst<U32>(Opcode::ShuffleXor, value, mask);
 }
 
-U32 IREmitter::ReadFirstLane(const U32& value) {
-    return Inst<U32>(Opcode::ReadFirstLane, value);
+U32 IREmitter::ReadFirstLane(const U32& value, const U1& exec) {
+    return Inst<U32>(Opcode::ReadFirstLane, value, exec);
 }
 
 U32 IREmitter::ReadLane(const U32& value, const U32& lane) {
@@ -687,6 +714,14 @@ U1 IREmitter::InverseBallot(const U64& mask) {
 
 U1 IREmitter::GroupAny(const U1& bit) {
     return Inst<U1>(Opcode::GroupAny, bit);
+}
+
+U1 IREmitter::WorkgroupAny(const U1& bit) {
+    return Inst<U1>(Opcode::WorkgroupAny, bit);
+}
+
+U1 IREmitter::WaveAny(const U1& bit) {
+    return Inst<U1>(Opcode::WaveAny, bit);
 }
 
 F32F64 IREmitter::FPAdd(const F32F64& a, const F32F64& b) {

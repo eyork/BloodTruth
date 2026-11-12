@@ -223,97 +223,162 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
                         vk::PipelineStageFlags2 dst_stage,
                         std::optional<SubresourceRange> subres_range) {
     auto& last_state = backing->state;
-    auto& subresource_states = backing->subresource_states;
+
+    constexpr auto write_flags = vk::AccessFlagBits2::eTransferWrite |
+                                 vk::AccessFlagBits2::eShaderWrite |
+                                 vk::AccessFlagBits2::eMemoryWrite;
+    const auto needs_barrier = [&](const State& state) {
+        return state.layout != dst_layout || state.access_mask != dst_mask ||
+               static_cast<bool>(state.access_mask & write_flags);
+    };
 
     const bool needs_partial_transition =
         subres_range &&
         (subres_range->base != SubresourceBase{} || subres_range->extent != info.resources);
-    const bool partially_transited = !subresource_states.empty();
 
-    if (needs_partial_transition || partially_transited) {
-        if (!partially_transited) {
-            subresource_states.resize(info.resources.levels * info.resources.layers);
-            std::fill(subresource_states.begin(), subresource_states.end(), last_state);
+    if (!needs_partial_transition && backing->subresource_runs.empty()) {
+        if (needs_barrier(last_state)) {
+            barriers.emplace_back(vk::ImageMemoryBarrier2{
+                .srcStageMask = last_state.pl_stage,
+                .srcAccessMask = last_state.access_mask,
+                .dstStageMask = dst_stage,
+                .dstAccessMask = dst_mask,
+                .oldLayout = last_state.layout,
+                .newLayout = dst_layout,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = GetImage(),
+                .subresourceRange{
+                    .aspectMask = aspect_mask,
+                    .baseMipLevel = 0,
+                    .levelCount = VK_REMAINING_MIP_LEVELS,
+                    .baseArrayLayer = 0,
+                    .layerCount = VK_REMAINING_ARRAY_LAYERS,
+                },
+            });
         }
+        last_state.layout = dst_layout;
+        last_state.access_mask = dst_mask;
+        last_state.pl_stage = dst_stage;
+        return;
+    }
 
-        // In case of partial transition, we need to change the specified subresources only.
-        // Otherwise all subresources need to be set to the same state so we can use a full
-        // resource transition for the next time.
-        const u32 start_mip = needs_partial_transition ? subres_range->base.level : u16{0};
-        const u32 end_mip = needs_partial_transition
-                                ? subres_range->base.level + subres_range->extent.levels
-                                : info.resources.levels;
-        const u32 start_layer = needs_partial_transition ? subres_range->base.layer : u16{0};
-        const u32 end_layer = needs_partial_transition
-                                  ? subres_range->base.layer + subres_range->extent.layers
-                                  : info.resources.layers;
-        for (u32 mip = start_mip; mip < end_mip; ++mip) {
-            for (u32 layer = start_layer; layer < end_layer; ++layer) {
-                // NOTE: these loops may produce a lot of small barriers.
-                // If this becomes a problem, we can optimize it by merging adjacent barriers.
-                const auto subres_idx = mip * info.resources.layers + layer;
-                ASSERT(subres_idx < subresource_states.size());
-                auto& state = subresource_states[subres_idx];
+    const u32 num_layers = info.resources.layers;
+    const u32 num_subresources = info.resources.levels * num_layers;
+    const size_t first_barrier = barriers.size();
+    auto& runs = backing->subresource_runs;
 
-                constexpr auto write_flags = vk::AccessFlagBits2::eTransferWrite |
-                                             vk::AccessFlagBits2::eShaderWrite |
-                                             vk::AccessFlagBits2::eMemoryWrite;
-                const bool is_write = static_cast<bool>(state.access_mask & write_flags);
-                if (state.layout != dst_layout || state.access_mask != dst_mask || is_write) {
-                    barriers.emplace_back(vk::ImageMemoryBarrier2{
-                        .srcStageMask = state.pl_stage,
-                        .srcAccessMask = state.access_mask,
-                        .dstStageMask = dst_stage,
-                        .dstAccessMask = dst_mask,
-                        .oldLayout = state.layout,
-                        .newLayout = dst_layout,
-                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                        .image = GetImage(),
-                        .subresourceRange{
-                            .aspectMask = aspect_mask,
-                            .baseMipLevel = mip,
-                            .levelCount = 1,
-                            .baseArrayLayer = layer,
-                            .layerCount = 1,
-                        },
-                    });
-                    state.layout = dst_layout;
-                    state.access_mask = dst_mask;
-                    state.pl_stage = dst_stage;
-                }
+    // Adds a barrier for the given mips and layers, extending the previous barrier of this call
+    // when it covers the preceding layers of the same mip from the same state.
+    const auto add_barrier = [&](const State& state, u32 mip, u32 level_count, u32 layer,
+                                 u32 layer_count) {
+        if (barriers.size() > first_barrier) {
+            auto& prev = barriers.back();
+            auto& range = prev.subresourceRange;
+            if (level_count == 1 && range.levelCount == 1 && range.baseMipLevel == mip &&
+                range.baseArrayLayer + range.layerCount == layer &&
+                prev.srcStageMask == state.pl_stage && prev.srcAccessMask == state.access_mask &&
+                prev.oldLayout == state.layout) {
+                range.layerCount += layer_count;
+                return;
             }
         }
-
-        if (!needs_partial_transition) {
-            subresource_states.clear();
-        }
-    } else { // Full resource transition
-        constexpr auto write_flags = vk::AccessFlagBits2::eTransferWrite |
-                                     vk::AccessFlagBits2::eShaderWrite |
-                                     vk::AccessFlagBits2::eMemoryWrite;
-        const bool is_write = static_cast<bool>(last_state.access_mask & write_flags);
-        if (last_state.layout == dst_layout && last_state.access_mask == dst_mask && !is_write) {
-            return;
-        }
         barriers.emplace_back(vk::ImageMemoryBarrier2{
-            .srcStageMask = last_state.pl_stage,
-            .srcAccessMask = last_state.access_mask,
+            .srcStageMask = state.pl_stage,
+            .srcAccessMask = state.access_mask,
             .dstStageMask = dst_stage,
             .dstAccessMask = dst_mask,
-            .oldLayout = last_state.layout,
+            .oldLayout = state.layout,
             .newLayout = dst_layout,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .image = GetImage(),
             .subresourceRange{
                 .aspectMask = aspect_mask,
-                .baseMipLevel = 0,
-                .levelCount = VK_REMAINING_MIP_LEVELS,
-                .baseArrayLayer = 0,
-                .layerCount = VK_REMAINING_ARRAY_LAYERS,
+                .baseMipLevel = mip,
+                .levelCount = level_count,
+                .baseArrayLayer = layer,
+                .layerCount = layer_count,
             },
         });
+    };
+    // Barriers for the subresources with an index in [begin, end), all in `state`.
+    const auto add_barriers = [&](const State& state, u32 begin, u32 end) {
+        while (begin < end) {
+            const u32 mip = begin / num_layers;
+            const u32 layer = begin % num_layers;
+            if (layer == 0 && end - begin >= num_layers) {
+                const u32 mips = (end - begin) / num_layers;
+                add_barrier(state, mip, mips, 0, num_layers);
+                begin += mips * num_layers;
+            } else {
+                const u32 count = std::min(num_layers - layer, end - begin);
+                add_barrier(state, mip, 1, layer, count);
+                begin += count;
+            }
+        }
+    };
+    // Makes `at` the first index of a run.
+    const auto split = [&](u32 at) {
+        if (at >= num_subresources) {
+            return;
+        }
+        const auto it = std::prev(runs.upper_bound(at));
+        if (it->first != at) {
+            runs.emplace_hint(std::next(it), at, it->second);
+        }
+    };
+    const auto run_end = [&](auto it) {
+        const auto next = std::next(it);
+        return next == runs.end() ? num_subresources : next->first;
+    };
+    // Transitions the subresources with an index in [begin, end).
+    const State dst_state{.pl_stage = dst_stage, .access_mask = dst_mask, .layout = dst_layout};
+    const auto transit = [&](u32 begin, u32 end) {
+        split(begin);
+        split(end);
+        auto first = runs.find(begin);
+        auto it = first;
+        for (; it != runs.end() && it->first < end; ++it) {
+            if (needs_barrier(it->second)) {
+                add_barriers(it->second, it->first, run_end(it));
+            }
+        }
+        first = runs.erase(first, it);
+        first = runs.emplace_hint(first, begin, dst_state);
+        if (first != runs.begin() && std::prev(first)->second == dst_state) {
+            first = std::prev(first);
+            runs.erase(std::next(first));
+        }
+        if (const auto next = std::next(first); next != runs.end() && next->second == dst_state) {
+            runs.erase(next);
+        }
+    };
+
+    if (!needs_partial_transition) {
+        // All subresources go to the same state, so the next transition can be a full one.
+        for (auto it = runs.begin(); it != runs.end(); ++it) {
+            if (needs_barrier(it->second)) {
+                add_barriers(it->second, it->first, run_end(it));
+            }
+        }
+        runs.clear();
+    } else {
+        if (runs.empty()) {
+            runs.emplace(0u, last_state);
+        }
+        const u32 start_mip = subres_range->base.level;
+        const u32 end_mip = start_mip + subres_range->extent.levels;
+        const u32 start_layer = subres_range->base.layer;
+        const u32 end_layer = start_layer + subres_range->extent.layers;
+        ASSERT(end_mip * num_layers <= num_subresources && end_layer <= num_layers);
+        if (start_layer == 0 && end_layer == num_layers) {
+            transit(start_mip * num_layers, end_mip * num_layers);
+        } else {
+            for (u32 mip = start_mip; mip < end_mip; ++mip) {
+                transit(mip * num_layers + start_layer, mip * num_layers + end_layer);
+            }
+        }
     }
 
     last_state.layout = dst_layout;

@@ -38,6 +38,12 @@ Inst::~Inst() {
 bool Inst::MayHaveSideEffects() const noexcept {
     switch (op) {
     case Opcode::Barrier:
+    case Opcode::LdsBarrier:
+    case Opcode::PredicatedBegin:
+    case Opcode::PredicatedEnd:
+    case Opcode::PredicatedEndU32:
+    case Opcode::PredicatedEndU64:
+    case Opcode::PredicatedEndF32:
     case Opcode::WorkgroupMemoryBarrier:
     case Opcode::DeviceMemoryBarrier:
     case Opcode::SubgroupBarrier:

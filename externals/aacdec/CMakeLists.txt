@@ -53,6 +53,7 @@ set(FDK_SRC
     fdk-aac/libFDK/src/nlc_dec.cpp
     fdk-aac/libFDK/src/qmf.cpp
     fdk-aac/libFDK/src/scale.cpp
+    fdk-aac/libFDK/src/fft.cpp
 )
 
 set(SYS_SRC

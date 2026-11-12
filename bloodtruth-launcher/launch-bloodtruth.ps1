@@ -1,4 +1,4 @@
-﻿param([string]$GamePath, [ValidateSet(0,30,60)][int]$MirrorFps=30, [ValidateSet('Original','High','Ultra8x')][string]$Resolution='High', [switch]$NoGui, [switch]$ValidateOnly, [switch]$OriginalMoveOrder)
+﻿param([string]$GamePath, [ValidateSet(0,30,60)][int]$MirrorFps=30, [ValidateSet('Original','High','Ultra8x')][string]$Resolution='Original', [ValidateSet('Auto','1','1.5','2')][string]$EyeUpscale='Auto', [switch]$NoGui, [switch]$ValidateOnly, [switch]$OriginalMoveOrder)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 if (-not $GamePath) { $GamePath=Join-Path $root 'games/CUSA11108/files/uroot/eboot.bin' }
@@ -42,7 +42,7 @@ $exe=Join-Path $PSScriptRoot 'shadps4.exe'
 if (-not (Test-Path $exe)) { throw 'Emulator executable is missing.' }
 $resolutionHelper=Join-Path $PSScriptRoot 'set-native-resolution.ps1'
 if ($Resolution -ne 'Original' -and -not (Test-Path -LiteralPath $resolutionHelper)) { throw 'Native resolution helper is missing.' }
-if ($ValidateOnly) { [pscustomobject]@{GamePath=$GamePath;Executable=$exe;MirrorFps=$MirrorFps;Resolution=$Resolution}; return }
+if ($ValidateOnly) { [pscustomobject]@{GamePath=$GamePath;Executable=$exe;MirrorFps=$MirrorFps;Resolution=$Resolution;EyeUpscale=$EyeUpscale}; return }
 if (Get-Process shadps4 -ErrorAction SilentlyContinue) { throw 'Close the running emulator first.' }
 $env:SHADPS4_OPENXR='1'; $env:SHADPS4_VR='1'
 
@@ -53,8 +53,25 @@ $env:SHADPS4_MOVE_SWAP_HANDS=if ($OriginalMoveOrder) { '0' } else { '1' }
 $env:SHADPS4_VR_WINDOW_FPS=[string]$MirrorFps
 $env:SHADPS4_TITLE_RESOLUTION='title'; $env:SHADPS4_TITLE_EYE_WIDTH=''
 $env:SHADPS4_VR_FPS_CAP=''; $env:SHADPS4_VR_PACE='1'
+$env:SHADPS4_HMD_END_EVENT_DELAY_US='2000'
+if (-not $env:SHADPS4_TITLE_RES_LOCK) { $env:SHADPS4_TITLE_RES_LOCK='1' }; $env:SHADPS4_TITLE_RES_LOCK_STRIDE='16'
+$env:SHADPS4_BT_VR_SCALE=switch ($Resolution) { 'High' { '1.5' } 'Ultra8x' { '2.83' } default { '' } }
+if ($EyeUpscale -eq 'Auto') { $EyeUpscale='1' }
+$env:SHADPS4_VR_UPSCALE=$EyeUpscale
+if (-not $env:SHADPS4_VR_SHARPEN) { $env:SHADPS4_VR_SHARPEN='0.3' }; if (-not $env:SHADPS4_VR_FOV) { $env:SHADPS4_VR_FOV='100' }; $env:SHADPS4_VR_FOV_OF='headset'; $env:SHADPS4_XR_PREDICT_MS='20'
 $env:SHADPS4_INPUT_SCRIPT=''; $env:SHADPS4_LIVE_INPUT=''
 $env:SHADPS4_XR_TEST_PRESS=''; $env:SHADPS4_XR_TEST_TURN=''
+# The pipeline cache stores translated shaders but only checks the GPU profile, so wipe it whenever
+# the emulator build or a setting that changes shader translation differs from the last launch.
+$cacheDir=Join-Path $PSScriptRoot 'user/cache'
+$stampPath=Join-Path $cacheDir 'shader-settings.stamp'
+$stamp=((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash,
+ (Get-ChildItem env: | Where-Object { $_.Name -like 'SHADPS4_WAVE64*' -or $_.Name -like 'SHADPS4_WWM*' } | Sort-Object Name | ForEach-Object { $_.Name+'='+$_.Value })) -join "`n"
+if ((Test-Path -LiteralPath $stampPath) -and (Get-Content -LiteralPath $stampPath -Raw).TrimEnd() -ne $stamp.TrimEnd()) {
+ Get-ChildItem -LiteralPath $cacheDir -Exclude 'shader-settings.stamp' | Remove-Item -Recurse -Force
+}
+New-Item -ItemType Directory -Force $cacheDir | Out-Null
+Set-Content -LiteralPath $stampPath -Value $stamp
 $process=Start-Process -FilePath $exe -WorkingDirectory $PSScriptRoot -ArgumentList @('-g',('"'+$GamePath+'"')) -WindowStyle Hidden -PassThru
 if ($Resolution -ne 'Original') {
  $shell=Join-Path $PSHOME 'powershell.exe'

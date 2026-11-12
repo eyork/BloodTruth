@@ -877,7 +877,7 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
         static std::unordered_set<u64> captured;
         std::scoped_lock lock{diagnostic_mutex};
         if (captured.size() < 128 && captured.insert(program.info.pgm_hash).second) {
-            IR::DumpProgram(program, program.info, "failed-srt.", true);
+            IR::DumpProgram(program, program.info, "failed-srt.");
         }
     }
 

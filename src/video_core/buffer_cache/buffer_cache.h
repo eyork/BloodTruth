@@ -165,6 +165,11 @@ private:
         }
     };
     IntervalList<Backing> resident_ranges;
+    u64 resident_epoch{};
+    u64 dma_synced_cpu_epoch{~0ULL};
+    u64 dma_synced_resident_epoch{~0ULL};
+    bool dma_last_walk_uploaded{true};
+    u64 uploaded_bytes{};
 
     u32 arena_memory_type_index{};
     u32 block_size{};

@@ -33,7 +33,7 @@ GraphicsPipeline::GraphicsPipeline(
     vk::PipelineCache pipeline_cache, std::span<const Shader::Info*, MaxShaderStages> infos,
     std::span<const Shader::RuntimeInfo, MaxShaderStages> runtime_infos,
     const Shader::Gcn::FetchShaderData* fetch_shader_, std::span<const vk::ShaderModule> modules,
-    SerializationSupport& sdata, bool preloading)
+    SerializationSupport& sdata, bool preloading, const DescBindings* desc_bindings)
     : Pipeline{instance, scheduler, desc_heap, profile, pipeline_cache}, key{key_} {
     if (fetch_shader_) {
         fetch_shader = *fetch_shader_;
@@ -41,7 +41,7 @@ GraphicsPipeline::GraphicsPipeline(
 
     const vk::Device device = instance.GetDevice();
     std::ranges::copy(infos, stages.begin());
-    BuildDescSetLayout(preloading);
+    BuildDescSetLayout(desc_bindings ? *desc_bindings : GetDescBindings(stages, preloading));
     const auto debug_str = GetDebugString();
 
     const vk::PushConstantRange push_constants = {
@@ -477,8 +477,9 @@ template void GraphicsPipeline::GetVertexInputs(
     VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT>& divisors,
     VertexInputs<AmdGpu::Buffer>& guest_buffers, u32 step_rate_0, u32 step_rate_1) const;
 
-void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
-    boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> bindings;
+GraphicsPipeline::DescBindings GraphicsPipeline::GetDescBindings(
+    std::span<const Shader::Info* const, MaxShaderStages> stages, bool preloading) {
+    DescBindings bindings;
     u32 binding{};
 
     for (const auto* stage : stages) {
@@ -516,6 +517,14 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
                 .stageFlags = stage_bit,
             });
         }
+    }
+    return bindings;
+}
+
+void GraphicsPipeline::BuildDescSetLayout(const DescBindings& bindings) {
+    u32 binding{};
+    for (const auto& layout_binding : bindings) {
+        binding = std::max(binding, layout_binding.binding + layout_binding.descriptorCount);
     }
     uses_push_descriptors = binding < instance.MaxPushDescriptors();
     const auto flags = uses_push_descriptors

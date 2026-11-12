@@ -58,6 +58,14 @@ public:
         intervals.reserve(n);
     }
 
+    /// Replaces the intervals with one interval spanning all of them.
+    void CollapseToHull() {
+        if (intervals.size() > 1) {
+            IV hull = intervals.front().SubRange(intervals.front().start, intervals.back().end);
+            intervals.assign(1, hull);
+        }
+    }
+
     /// Adds a range to the interval set.
     void Add(IV value) {
         if (value.start >= value.end) [[unlikely]] {

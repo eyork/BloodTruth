@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <bitset>
 #include <condition_variable>
 #include <coroutine>
 #include <exception>
@@ -193,6 +194,7 @@ private:
 
     void ProcessCommands();
     void Process(std::stop_token stoken);
+    s32 OldestSubmitQueue(const std::bitset<NumTotalQueues>& skip);
 
     struct GpuQueue {
         std::mutex m_access{};
@@ -201,6 +203,7 @@ private:
         std::vector<u32> dcb_buffer;
         std::vector<u32> ccb_buffer;
         std::queue<Task::Handle> submits{};
+        std::queue<u64> submit_order{};
         ComputeProgram cs_state{};
     };
     std::array<GpuQueue, NumTotalQueues> mapped_queues{};
@@ -233,6 +236,7 @@ private:
     const bool guest_markers_enabled;
     std::jthread process_thread{};
     std::atomic<u32> num_submits{};
+    std::atomic<u64> next_submit_order{};
     std::atomic<u32> num_commands{};
     std::atomic<bool> submit_done{};
     std::mutex submit_mutex;

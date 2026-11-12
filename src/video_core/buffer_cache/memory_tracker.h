@@ -4,6 +4,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <deque>
 #include <vector>
 
@@ -37,8 +38,17 @@ public:
         });
     }
 
+    /// Changes whenever a region becomes CPU modified, so a caller that synchronized everything
+    /// can tell whether anything needs uploading again.
+    u64 CpuModifiedEpoch() const noexcept {
+        return cpu_modified_epoch.load(std::memory_order_acquire);
+    }
+
     /// Unmark region as modified from the host GPU
     void UnmarkRegionAsGpuModified(VAddr cpu_addr, u64 size, bool is_write) noexcept {
+        if (is_write) {
+            BumpCpuModifiedEpoch();
+        }
         IteratePages(cpu_addr, size, [is_write](RegionManager* manager, u64 offset, u64 size) {
             if (is_write) {
                 manager->template ChangeRegionState<StateOp::Set, StateOp::Clear>(offset, size);
@@ -50,6 +60,7 @@ public:
 
     /// Mark region as modified from the CPU
     void MarkRegionAsCpuModified(VAddr cpu_addr, u64 size) noexcept {
+        BumpCpuModifiedEpoch();
         IteratePages(cpu_addr, size, [](RegionManager* manager, u64 offset, u64 size) {
             manager->template ChangeRegionState<StateOp::Set, StateOp::None>(offset, size);
         });
@@ -60,6 +71,7 @@ public:
         if (readbacks_mode == GpuReadbacksMode::Disabled) {
             return MarkRegionAsCpuModified(cpu_addr, size);
         }
+        BumpCpuModifiedEpoch();
         bool should_flush = false;
         IteratePages(cpu_addr, size, [&should_flush](RegionManager* manager, u64 offset, u64 size) {
             const auto bounds = manager->GetBounds(offset, size);
@@ -103,6 +115,10 @@ public:
     }
 
 private:
+    void BumpCpuModifiedEpoch() noexcept {
+        cpu_modified_epoch.fetch_add(1, std::memory_order_acq_rel);
+    }
+
     template <bool create_region_on_fail = false, typename Func>
     bool IteratePages(VAddr cpu_address, u64 size, Func&& func) {
         using FuncReturn = typename std::invoke_result<Func, RegionManager*, u64, size_t>::type;
@@ -156,6 +172,7 @@ private:
 
     PageManager* tracker;
     const u32 readbacks_mode;
+    std::atomic<u64> cpu_modified_epoch{};
     std::deque<std::array<RegionManager, MANAGER_POOL_SIZE>> manager_pool;
     std::vector<RegionManager*> free_managers;
     std::array<RegionManager*, NUM_HIGH_PAGES> top_tier{};

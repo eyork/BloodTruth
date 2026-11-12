@@ -18,6 +18,12 @@ OPCODE(ReadConst,                                           U32,            U32x
 OPCODE(ReadConstBuffer,                                     U32,            Opaque,         U32,                                                            )
 
 // Barriers
+OPCODE(PredicatedBegin,                                     Void,           U1,                                                                             )
+OPCODE(PredicatedEnd,                                       Void,                                                                                           )
+OPCODE(PredicatedEndU32,                                    U32,            U32,                                                                            )
+OPCODE(PredicatedEndU64,                                    U64,            U64,                                                                            )
+OPCODE(PredicatedEndF32,                                    F32,            F32,                                                                            )
+OPCODE(LdsBarrier,                                          Void,                                                                                           )
 OPCODE(Barrier,                                             Void,                                                                                           )
 OPCODE(WorkgroupMemoryBarrier,                              Void,                                                                                           )
 OPCODE(DeviceMemoryBarrier,                                 Void,                                                                                           )
@@ -461,7 +467,7 @@ OPCODE(WarpId,                                              U32,                
 OPCODE(QuadBroadcast,                                       U32,            U32,            U32                                                             )
 OPCODE(Shuffle,                                             U32,            U32,            U32                                                             )
 OPCODE(ShuffleXor,                                          U32,            U32,            U32,                                                            )
-OPCODE(ReadFirstLane,                                       U32,            U32,                                                                            )
+OPCODE(ReadFirstLane,                                       U32,            U32,            U1,                                                             )
 OPCODE(ReadLane,                                            U32,            U32,            U32                                                             )
 OPCODE(WriteLane,                                           U32,            U32,            U32,            U32                                             )
 OPCODE(Ballot,                                              U64,            U1,                                                                             )
@@ -470,6 +476,8 @@ OPCODE(InverseBallot,                                       U1,             U64,
 OPCODE(DataAppend,                                          U32,            U32,            U1                                                              )
 OPCODE(DataConsume,                                         U32,            U32,            U1                                                              )
 OPCODE(GroupAny,                                            U1,             U1,                                                                             )
+OPCODE(WorkgroupAny,                                        U1,             U1,                                                                             )
+OPCODE(WaveAny,                                             U1,             U1,                                                                             )
 
 // Time operations
 OPCODE(Memtime,                                             U64,                                                                                            )

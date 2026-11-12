@@ -505,6 +505,7 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
         // The machine has a headset of its own: its session is made on this device.
         hmd_pp_pass.Create(instance, draw_scheduler.GetWorkSemaphore(),
                            Core::Vr::OpenXrHost::FrameFormat);
+        hmd_fsr_pass.Create(device, instance.GetAllocator(), num_images * 2);
         Core::Vr::OpenXrHost::Instance().Start({
             .instance = instance.GetInstance(),
             .physical_device = instance.GetPhysicalDevice(),
@@ -881,7 +882,20 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
     const bool crop = spectator && desktop_crop;
     const float desktop_aspect = Core::Vr::DesktopViewAspect(
         desktop_view, fov, static_cast<float>(eye_width) / eye_height);
-    Frame* const local = exported ? nullptr : vr_exporter->AcquireLocal(eye_width * 2, eye_height);
+    // SHADPS4_VR_UPSCALE=<1..3> (default 1): the local headset gets each eye that many times
+    // larger, enlarged by FSR 1 (EASU + RCAS) instead of the compositor's bilinear stretch.
+    static const float vr_upscale = [] {
+        const char* value = std::getenv("SHADPS4_VR_UPSCALE");
+        return value != nullptr ? std::clamp(static_cast<float>(std::atof(value)), 1.0f, 3.0f)
+                                : 1.0f;
+    }();
+    const bool upscale_eyes = vr_upscale > 1.0f && !packed_stereo;
+    const vk::Extent2D local_eye =
+        upscale_eyes ? vk::Extent2D{static_cast<u32>(eye_width * vr_upscale + 0.5f) & ~1u,
+                                    static_cast<u32>(eye_height * vr_upscale + 0.5f) & ~1u}
+                     : vk::Extent2D{eye_width, eye_height};
+    Frame* const local =
+        exported ? nullptr : vr_exporter->AcquireLocal(local_eye.width * 2, local_eye.height);
     if (!exported) {
         expected_ratio = crop ? std::nullopt : std::optional{desktop_aspect};
         static const double window_fps = [] {
@@ -1071,6 +1085,15 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
         DebugState.output_resolution = {frame->width, frame->height};
     }
     if (local != nullptr) {
+        if (upscale_eyes) {
+            const HostPasses::FsrPass::Settings fsr{
+                .enable = true, .use_rcas = true, .rcas_attenuation = 0.25f};
+            for (u32 eye = 0; eye < 2; ++eye) {
+                eye_views[eye] = hmd_fsr_pass.Render(cmdbuf, eye_views[eye],
+                                                     {eye_width, eye_height}, local_eye, fsr,
+                                                     false);
+            }
+        }
         // An image that encodes for display itself.
         auto local_settings = hmd_settings;
         local_settings.linear_out = 1;

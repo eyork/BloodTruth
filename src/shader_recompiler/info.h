@@ -46,6 +46,9 @@ struct InfoPersistent {
 
     u32 fetch_shader_sgpr_base{};
     u32 shared_memory_scratch_size{};
+    u32 unpredicated_wave_regions{};
+    u32 per_subgroup_lane_ops{};
+    u32 per_lane_ends{};
 
     u64 pgm_hash{};
 
@@ -124,6 +127,7 @@ struct Info : InfoPersistent {
     bool uses_group_quad{};
     bool uses_group_shuffle{};
     bool uses_group_ballot{};
+    bool uses_group_vote{};
     IR::Type shared_types{};
     bool uses_fp16{};
     bool uses_fp64{};
