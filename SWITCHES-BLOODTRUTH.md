@@ -80,6 +80,14 @@ does not know about them; the first run after that compiles again.
 `SHADPS4_VR_*` (window, refresh, desktop view, turning), `SHADPS4_MOVE_SWAP_HANDS`,
 `SHADPS4_BLOODTRUTH_DMEM_ALIAS` (launcher sets `1`). See `launch-bloodtruth.ps1` and `src/core/vr/`.
 
+## Contributors
+
+- **eyork** (github.com/eyork): GPU culling / wave64 fixes, GPU command-thread speedups, background pipeline
+  compilation, 3D audio, VR resolution and pacing work, this document. Written with AI assistance (Claude Code).
+- Built on **evertec82**'s Blood & Truth PC VR prototype (github.com/evertec82/BloodTruth) and shadPS4.
+- Ideas and code adapted from: the AstroQuest shadPS4 fork (Audio3d object spatializer), the Wipeport PSVR
+  port (background pipeline compilation), PS4Recomp (wave64 predication pass).
+
 ## Known problems
 
 - Some objects can still blink or go missing in places (doors, the photos on the interrogation whiteboard)
