@@ -304,6 +304,8 @@ set(AUDIO_LIB src/core/libraries/audio/audioin.cpp
               src/core/libraries/audio/audioout_backend.h
               src/core/libraries/audio/audioout_error.h
               src/core/libraries/audio/sdl_audio_out.cpp
+              src/core/libraries/audio/surround_virtualizer.cpp
+              src/core/libraries/audio/surround_virtualizer.h
               src/core/libraries/audio/openal_audio_out.cpp
               src/core/libraries/audio/openal_manager.h
               src/core/libraries/ngs2/ngs2.cpp
@@ -311,6 +313,8 @@ set(AUDIO_LIB src/core/libraries/audio/audioin.cpp
               src/core/libraries/audio3d/audio3d.cpp
               src/core/libraries/audio3d/audio3d_openal.cpp
               src/core/libraries/audio3d/audio3d_openal.h
+              src/core/libraries/audio3d/audio3d_spatializer.cpp
+              src/core/libraries/audio3d/audio3d_spatializer.h
               src/core/libraries/audio3d/audio3d.h
               src/core/libraries/audio3d/audio3d_error.h
 )
@@ -962,6 +966,8 @@ set(CORE src/core/aerolib/stubs.cpp
          ${CAMERA_LIBS}
          ${COMPANION_LIBS}
          ${DEV_TOOLS}
+         src/core/bloodtruth_title.cpp
+         src/core/bloodtruth_title.h
          src/core/debug_state.cpp
          src/core/debug_state.h
          src/core/debugger.cpp
@@ -1068,6 +1074,10 @@ set(SHADER_RECOMPILER src/shader_recompiler/profile.h
                       src/shader_recompiler/ir/passes/lower_hardware_intrinsics.cpp
                       src/shader_recompiler/ir/passes/lower_user_clip_planes.cpp
                       src/shader_recompiler/ir/passes/lower_wave64_pass.cpp
+                      src/shader_recompiler/ir/passes/lower_wave_ops_pass.cpp
+                      src/shader_recompiler/ir/passes/predicate_wave64_pass.cpp
+                      src/shader_recompiler/ir/passes/wave_uniformity.h
+                      src/shader_recompiler/ir/passes/lane_mask_bits.h
                       src/shader_recompiler/ir/passes/phi_simplification_pass.cpp
                       src/shader_recompiler/ir/passes/readlane_elimination_pass.cpp
                       src/shader_recompiler/ir/passes/resource_discover_pass.cpp

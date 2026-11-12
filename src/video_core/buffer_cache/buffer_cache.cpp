@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <magic_enum/magic_enum.hpp>
 
 #include "common/alignment.h"
@@ -212,16 +213,70 @@ bool BufferCache::IsRegionGpuModified(VAddr addr, size_t size) {
     return memory_tracker->IsRegionGpuModified(addr, size);
 }
 
+static bool DmaSyncSkip() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_DMA_SYNC_SKIP");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
 void BufferCache::SynchronizeDmaBuffers(
     const std::function<void(const Buffer*, u64, u64)>& on_range) {
     fault_process_pending = true;
+    // Walking every resident range for each draw that uses DMA costs the command processor
+    // most of its time when a title issues thousands of such draws a frame. Nothing can need an
+    // upload unless some region became CPU modified or another range became resident since the
+    // last walk. The epochs are read before the walk, so a change during it walks again.
+    // Memory whose writes are not tracked stays CPU modified and uploads on every walk, so a
+    // walk that uploaded anything is never skipped after.
+    const u64 cpu_epoch = memory_tracker->CpuModifiedEpoch();
+    const u64 residency = resident_epoch;
+    const bool walk = !DmaSyncSkip() || dma_last_walk_uploaded ||
+                      cpu_epoch != dma_synced_cpu_epoch || residency != dma_synced_resident_epoch;
+    const u64 uploaded_before = uploaded_bytes;
+    const Buffer* span_arena = nullptr;
+    u64 span_begin{};
+    u64 span_end{};
     for (const auto& range : resident_ranges) {
         const u64 page = range.start >> (ARENA_PAGE_BITS - block_shift);
         const VAddr device_addr = range.start << block_shift;
         const u64 size = (range.end - range.start) << block_shift;
         const auto* arena = address_space[page];
-        SynchronizeMemory(arena, device_addr, size, false, false);
-        on_range(arena, arena->Offset(device_addr), size);
+        if (walk) {
+            SynchronizeMemory(arena, device_addr, size, false, false);
+        }
+        if (arena != span_arena) {
+            if (span_arena) {
+                on_range(span_arena, span_begin, span_end - span_begin);
+            }
+            span_arena = arena;
+            span_begin = arena->Offset(device_addr);
+        }
+        span_end = arena->Offset(device_addr) + size;
+    }
+    if (span_arena) {
+        on_range(span_arena, span_begin, span_end - span_begin);
+    }
+    if (walk) {
+        dma_synced_cpu_epoch = cpu_epoch;
+        dma_synced_resident_epoch = residency;
+        dma_last_walk_uploaded = uploaded_bytes != uploaded_before;
+    }
+
+    static const bool stats = [] {
+        const char* value = std::getenv("SHADPS4_DMA_SYNC_STATS");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (stats) {
+        static u64 calls{}, walks{}, walk_bytes{};
+        ++calls;
+        walks += walk ? 1 : 0;
+        walk_bytes += uploaded_bytes - uploaded_before;
+        if (calls % 3000 == 0) {
+            LOG_ERROR(Render, "[DmaSync] {} draws, {} walks, {} KiB uploaded by walks, {} ranges",
+                      calls, walks, walk_bytes / 1024, resident_ranges.Size());
+        }
     }
 }
 
@@ -247,6 +302,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
     }
 
     LOG_WARNING(Render, "Migrating arena");
+    ++resident_epoch;
 
     const u64 first_addr = first_arena ? first_arena->cpu_addr : (first_page << ARENA_PAGE_BITS);
     const u64 first_size = first_arena ? first_arena->size_bytes : ARENA_PAGE_SIZE;
@@ -290,6 +346,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     if (bind_ranges.Empty()) {
         return;
     }
+    ++resident_epoch;
 
     const vk::MemoryAllocateFlagsInfo alloc_flags = {
         .flags = vk::MemoryAllocateFlagBits::eDeviceAddress,
@@ -348,6 +405,7 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
         total_size_bytes += size;
     });
     if (!copies.empty()) {
+        uploaded_bytes += total_size_bytes;
         const auto staging = staging_pool.Request(total_size_bytes, MemoryType::HostUncached);
         for (auto& copy : copies) {
             memory->CopySparseMemory(copy.dstOffset, staging.mapped + copy.srcOffset, copy.size);

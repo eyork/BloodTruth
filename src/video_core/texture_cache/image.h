@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <map>
 #include <mutex>
 #include <optional>
 
@@ -148,11 +149,15 @@ public:
         vk::PipelineStageFlags2 pl_stage = vk::PipelineStageFlagBits2::eAllCommands;
         vk::AccessFlags2 access_mask = vk::AccessFlagBits2::eNone;
         vk::ImageLayout layout = vk::ImageLayout::eUndefined;
+
+        bool operator==(const State&) const = default;
     };
     struct BackingImage {
         UniqueImage image;
         State state;
-        std::vector<State> subresource_states;
+        // While partially transited: runs of subresources (index mip * layers + layer) in the
+        // same state, keyed by the first index of each run.
+        std::map<u32, State> subresource_runs;
         SmallVector<ImageViewInfo, 2> image_view_infos;
         SmallVector<ImageViewId, 2> image_view_ids;
         u32 num_samples;

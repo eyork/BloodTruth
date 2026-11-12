@@ -1,9 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <cstdlib>
 #include <mutex>
+#include <optional>
+#include <thread>
 #include "common/elf_info.h"
 #include "core/vr/stereo_layout.h"
 
@@ -61,6 +66,65 @@ Core::Vr::Fov FovFromUv(const OrbisHmdReprojectionEyeUv& left_eye) {
     };
 }
 
+// SHADPS4_HMD_END_EVENT_DELAY_US=<microseconds> (default 0): the end-of-reprojection user event
+// comes that long after the start one, as on hardware where the warp takes a few milliseconds.
+// A pacing thread that re-adds the start event, waits, then re-adds the end event and waits
+// misses an end event triggered at the same instant, counting only every second refresh.
+u32 EndEventDelayUs() {
+    static const u32 delay = [] {
+        const char* value = std::getenv("SHADPS4_HMD_END_EVENT_DELAY_US");
+        return value != nullptr ? static_cast<u32>(std::clamp(std::atoi(value), 0, 50'000)) : 0u;
+    }();
+    return delay;
+}
+
+class DelayedTrigger {
+public:
+    void Schedule(const UserEvent& event, std::chrono::microseconds delay) {
+        {
+            std::scoped_lock lock{mutex};
+            pending = Pending{std::chrono::steady_clock::now() + delay, event};
+            if (!thread.joinable()) {
+                thread = std::jthread([this](std::stop_token stop) { Run(stop); });
+            }
+        }
+        cv.notify_one();
+    }
+
+private:
+    struct Pending {
+        std::chrono::steady_clock::time_point when;
+        UserEvent event;
+    };
+
+    void Run(std::stop_token stop) {
+        std::unique_lock lock{mutex};
+        while (!stop.stop_requested()) {
+            if (!pending) {
+                cv.wait(lock, stop, [this] { return pending.has_value(); });
+                continue;
+            }
+            const auto when = pending->when;
+            if (cv.wait_until(lock, stop, when,
+                              [this, when] { return !pending || pending->when != when; })) {
+                continue;
+            }
+            const UserEvent event = pending->event;
+            pending.reset();
+            lock.unlock();
+            event.Trigger();
+            lock.lock();
+        }
+    }
+
+    std::mutex mutex;
+    std::condition_variable_any cv;
+    std::optional<Pending> pending;
+    std::jthread thread;
+};
+
+DelayedTrigger g_end_trigger;
+
 } // namespace
 
 void OnVblank() {
@@ -75,7 +139,11 @@ void OnVblank() {
         end_event = g_reprojection.end_event;
     }
     start_event.Trigger();
-    end_event.Trigger();
+    if (const u32 delay = EndEventDelayUs(); delay != 0 && end_event.is_set) {
+        g_end_trigger.Schedule(end_event, std::chrono::microseconds{delay});
+    } else {
+        end_event.Trigger();
+    }
 }
 
 s32 PS4_SYSV_ABI sceHmdReprojectionStartMultilayer(

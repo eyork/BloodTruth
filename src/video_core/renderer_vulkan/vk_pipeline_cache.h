@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <memory>
 #include <variant>
 #include <tsl/robin_map.h>
 #include "shader_recompiler/profile.h"
@@ -37,6 +38,7 @@ namespace Vulkan {
 class Instance;
 class Scheduler;
 class ShaderCache;
+class PipelineCompiler;
 
 struct Program {
     struct Module {
@@ -69,7 +71,10 @@ public:
     bool LoadGraphicsPipeline(Serialization::Archive& ar);
     bool LoadPipelineStage(Serialization::Archive& ar, size_t stage);
 
-    const GraphicsPipeline* GetGraphicsPipeline(const DrawIndirectParams params = {});
+    const GraphicsPipeline* GetGraphicsPipeline(const DrawIndirectParams params = {},
+                                                bool indirect = false);
+
+    void TickFrame();
 
     const ComputePipeline* GetComputePipeline();
 
@@ -101,6 +106,14 @@ private:
                                    Shader::Backend::Bindings& binding);
     const Shader::RuntimeInfo& BuildRuntimeInfo(Shader::HwStage stage, Shader::SwStage l_stage);
 
+    struct PendingPipeline;
+
+    bool IsAsyncEnabled() const;
+    bool IsDrawSkippable(bool indirect) const;
+    void TrackDrawTarget();
+    const GraphicsPipeline* GetGraphicsPipelineAsync(bool indirect);
+    const GraphicsPipeline* FinishPipeline(const GraphicsPipelineKey& key, PendingPipeline& job);
+
     [[nodiscard]] bool IsPipelineCacheDirty() const {
         return num_new_pipelines > 0;
     }
@@ -130,6 +143,17 @@ private:
     tsl::robin_map<vk::ShaderModule,
                    std::vector<std::variant<GraphicsPipelineKey, ComputePipelineKey>>>
         module_related_pipelines;
+
+    struct TargetStreak {
+        u32 last_frame{};
+        u32 frames{};
+    };
+    tsl::robin_map<GraphicsPipelineKey, std::shared_ptr<PendingPipeline>> pending_pipelines;
+    tsl::robin_map<VAddr, TargetStreak> target_streaks;
+    std::unique_ptr<PipelineCompiler> compiler;
+    u32 frame_number{1};
+    u32 draws_this_frame{};
+    u32 draws_last_frame{};
 };
 
 } // namespace Vulkan

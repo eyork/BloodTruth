@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <string_view>
+
 #include "common/logging/classes.h"
 #include "shader_recompiler/frontend/control_flow_graph.h"
 #include "shader_recompiler/frontend/decode.h"
@@ -13,6 +16,18 @@
 #include "shader_recompiler/recompiler.h"
 
 namespace Shader {
+
+static bool Wave64Predicate(u64 pgm_hash) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_WAVE64_PREDICATE");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!enabled) {
+        return false;
+    }
+    const char* only = std::getenv("SHADPS4_WAVE64_PREDICATE_ONLY");
+    return only == nullptr || std::string_view{only}.contains(fmt::format("{:x}", pgm_hash));
+}
 
 IR::BlockList GenerateBlocks(const IR::AbstractSyntaxList& syntax_list) {
     size_t num_syntax_blocks{};
@@ -128,15 +143,27 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
 
     // Structurize control flow graph and create program.
     program.syntax_list = Shader::Gcn::BuildASL(pools, cfg, info);
+    if (!Wave64Predicate(info.pgm_hash)) {
+        Shader::Optimization::HoistWave64CrossLaneOpsPass(program, pools.block_pool,
+                                                          pools.inst_pool, runtime_info, profile);
+    }
     program.blocks = GenerateBlocks(program.syntax_list);
     program.post_order_blocks = Shader::IR::PostOrder(program.syntax_list.front().data.block);
 
     // Run optimization passes on structured graph
     Shader::Optimization::SsaRepairPass(program);
+    if (Wave64Predicate(info.pgm_hash)) {
+        Shader::Optimization::PredicateWave64Pass(program, runtime_info, profile);
+    }
     Shader::Optimization::SsaRewritePass(program);
     Shader::Optimization::SharedMemoryBarrierPass(program, runtime_info, profile);
     Shader::Optimization::DeadCodeEliminationPass(program);
-    Shader::Optimization::LowerWave64BallotPass(program, runtime_info, profile);
+    if (Wave64Predicate(info.pgm_hash)) {
+        Shader::Optimization::ConstantPropagationPass(program.post_order_blocks);
+        Shader::Optimization::LowerWaveOpsPass(program, runtime_info, profile);
+    } else {
+        Shader::Optimization::LowerWave64BallotPass(program, runtime_info, profile);
+    }
     Shader::Optimization::LowerHardwareIntrinsics(program);
     Shader::Optimization::ConstantPropagationPass(program.post_order_blocks);
     Shader::Optimization::DeadCodeEliminationPass(program);

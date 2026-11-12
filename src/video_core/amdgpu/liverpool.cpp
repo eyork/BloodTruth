@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <bitset>
+#include <chrono>
+#include <cstdlib>
 #include <boost/preprocessor/stringize.hpp>
 
 #include "common/assert.h"
@@ -9,6 +13,7 @@
 #include "common/thread.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "core/libraries/gnmdriver/gnmdriver.h"
 #include "core/libraries/kernel/process.h"
 #include "core/libraries/videoout/driver.h"
 #include "core/memory.h"
@@ -19,6 +24,83 @@
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 namespace AmdGpu {
+
+namespace {
+
+// SHADPS4_TITLE_RES_LOCK=1: titles that size their render targets from the difference of two
+// end-of-pipe perf-counter stamps see the emulator's command translation time, not GPU time, and
+// keep lowering their resolution. The second stamp of a pair (SHADPS4_TITLE_RES_LOCK_STRIDE bytes
+// after the first, default 8) is written as the first plus at most SHADPS4_TITLE_RES_LOCK_MS.
+void LogLongWait(const PM4CmdWaitRegMem* wait, std::span<const u32> regs, const char* queue,
+                 std::chrono::steady_clock::time_point start, bool& logged) {
+    if (logged || std::chrono::steady_clock::now() - start < std::chrono::seconds{2}) {
+        return;
+    }
+    logged = true;
+    const bool memory = wait->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory;
+    LOG_WARNING(Render, "{} WaitRegMem stuck for 2 s: {} {:#x} = {:#x}, mask {:#x}, function {}, ref {:#x}",
+                queue, memory ? "memory" : "register",
+                memory ? reinterpret_cast<uintptr_t>(wait->Address<u32*>()) : wait->Reg(),
+                memory ? *wait->Address<u32*>() : regs[wait->Reg()], wait->mask,
+                static_cast<u32>(wait->function.Value()), wait->ref);
+}
+
+bool ResLock() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_TITLE_RES_LOCK");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+}
+
+u64 ResLockStamp(VAddr address) {
+    static const u64 cap_ticks = [] {
+        double ms = 2.0;
+        if (const char* value = std::getenv("SHADPS4_TITLE_RES_LOCK_MS")) {
+            ms = std::clamp(std::atof(value), 0.0, 1000.0);
+        }
+        return static_cast<u64>(ms * 1e-3 *
+                                Libraries::GnmDriver::sceGnmGetGpuCoreClockFrequency());
+    }();
+    static const VAddr stride = [] {
+        const char* value = std::getenv("SHADPS4_TITLE_RES_LOCK_STRIDE");
+        return value != nullptr ? static_cast<VAddr>(std::clamp(std::atoi(value), 8, 256))
+                                : VAddr{sizeof(u64)};
+    }();
+    static VAddr last_address = 0;
+    static u64 last_value = 0;
+    const u64 now = GetGpuPerfCounter();
+    u64 value = now;
+    if (address == last_address + stride && now >= last_value) {
+        value = last_value + std::min(now - last_value, cap_ticks);
+    }
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        LOG_INFO(Render, "SHADPS4_TITLE_RES_LOCK: GPU frame stamps capped at {} ticks", cap_ticks);
+    }
+    last_address = address;
+    last_value = value;
+    return value;
+}
+
+bool SubmitOrder() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_SUBMIT_ORDER");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
+bool AscReleaseFinish() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_ASC_RELEASE_FINISH");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
+} // namespace
 
 static const char* dcb_task_name{"DCB_TASK"};
 static const char* ccb_task_name{"CCB_TASK"};
@@ -109,11 +191,23 @@ void Liverpool::Process(std::stop_token stoken) {
         VideoCore::StartCapture();
 
         curr_qid = -1;
+        std::bitset<NumTotalQueues> yielded{};
 
         while (num_submits || num_commands) {
             ProcessCommands();
 
-            curr_qid = (curr_qid + 1) % num_mapped_queues;
+            if (SubmitOrder()) {
+                curr_qid = OldestSubmitQueue(yielded);
+                if (curr_qid < 0) {
+                    yielded.reset();
+                    curr_qid = OldestSubmitQueue(yielded);
+                }
+                if (curr_qid < 0) {
+                    continue;
+                }
+            } else {
+                curr_qid = (curr_qid + 1) % num_mapped_queues;
+            }
 
             auto& queue = mapped_queues[curr_qid];
 
@@ -129,13 +223,17 @@ void Liverpool::Process(std::stop_token stoken) {
 
             if (task.done()) {
                 task.destroy();
+                yielded.reset();
 
                 std::scoped_lock lock{queue.m_access};
                 queue.submits.pop();
+                queue.submit_order.pop();
 
                 --num_submits;
                 std::scoped_lock lock2{submit_mutex};
                 submit_cv.notify_all();
+            } else {
+                yielded.set(curr_qid);
             }
         }
 
@@ -150,6 +248,23 @@ void Liverpool::Process(std::stop_token stoken) {
 
         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
     }
+}
+
+s32 Liverpool::OldestSubmitQueue(const std::bitset<NumTotalQueues>& skip) {
+    s32 oldest_qid = -1;
+    u64 oldest = ~0ULL;
+    for (u32 qid = 0; qid < num_mapped_queues; ++qid) {
+        if (skip.test(qid)) {
+            continue;
+        }
+        auto& queue = mapped_queues[qid];
+        std::scoped_lock lock{queue.m_access};
+        if (!queue.submit_order.empty() && queue.submit_order.front() < oldest) {
+            oldest = queue.submit_order.front();
+            oldest_qid = static_cast<s32>(qid);
+        }
+    }
+    return oldest_qid;
 }
 
 Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
@@ -681,8 +796,16 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (rasterizer) {
                     rasterizer->OnFence();
                 }
+                const bool res_lock =
+                    event_eop->data_sel.Value() == DataSelect::PerfCounter && ResLock();
+                const u64 locked_stamp =
+                    res_lock ? ResLockStamp(reinterpret_cast<VAddr>(event_eop->Address<u64>()))
+                             : 0;
                 event_eop->SignalFence(
-                    [](void* address, u64 data, u32 num_bytes) {
+                    [res_lock, locked_stamp](void* address, u64 data, u32 num_bytes) {
+                        if (res_lock && num_bytes == sizeof(u64)) {
+                            data = locked_stamp;
+                        }
                         auto* memory = Core::Memory::Instance();
                         ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
                     },
@@ -790,7 +913,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
                     break;
                 }
+                const auto wait_start = std::chrono::steady_clock::now();
+                bool wait_logged = false;
                 while (!wait_reg_mem->Test(regs.reg_array)) {
+                    LogLongWait(wait_reg_mem, regs.reg_array, "GFX", wait_start, wait_logged);
                     YIELD_GFX();
                 }
                 break;
@@ -1098,7 +1224,10 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         case PM4ItOpcode::WaitRegMem: {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
+            const auto wait_start = std::chrono::steady_clock::now();
+            bool wait_logged = false;
             while (!wait_reg_mem->Test(regs.reg_array)) {
+                LogLongWait(wait_reg_mem, regs.reg_array, "ASC", wait_start, wait_logged);
                 YIELD_ASC(vqid);
             }
             break;
@@ -1107,6 +1236,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
             if (rasterizer) {
                 rasterizer->OnFence();
+                if (AscReleaseFinish()) {
+                    rasterizer->Finish();
+                }
             }
             release_mem->SignalFence(
                 [pipe_id = queue.pipe_id] {
@@ -1181,6 +1313,7 @@ void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
     {
         std::scoped_lock lock{queue.m_access};
         queue.submits.emplace(task.handle);
+        queue.submit_order.emplace(next_submit_order++);
     }
 
     std::scoped_lock lk{submit_mutex};
@@ -1197,6 +1330,7 @@ void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
     {
         std::scoped_lock lock{queue.m_access};
         queue.submits.emplace(task.handle);
+        queue.submit_order.emplace(next_submit_order++);
     }
 
     std::scoped_lock lk{submit_mutex};

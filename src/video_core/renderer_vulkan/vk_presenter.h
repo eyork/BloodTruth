@@ -160,6 +160,7 @@ private:
     /// The same pass for the frames of the machine's own headset, which have a format of their
     /// own. Only made where there is such a headset to draw for.
     HostPasses::PostProcessingPass hmd_pp_pass;
+    HostPasses::FsrPass hmd_fsr_pass;
     AmdGpu::Liverpool* liverpool;
     Scheduler draw_scheduler;
     Scheduler present_scheduler;
