@@ -6,6 +6,7 @@
 #include "shader_recompiler/ir/basic_block.h"
 #include "shader_recompiler/ir/dominance.h"
 #include "shader_recompiler/ir/ir_emitter.h"
+#include "shader_recompiler/ir/passes/lane_mask_bits.h"
 #include "shader_recompiler/ir/program.h"
 
 namespace Shader::Optimization {
@@ -17,6 +18,7 @@ void SsaRepairPass(IR::Program& program) {
     IR::ComputeDominanceFrontiers(post_order);
 
     boost::container::small_vector<IR::Use, 2> invalid_uses;
+    Optimization::LaneMaskScratch mask_scratch;
     for (IR::Block* block : post_order) {
         for (IR::Inst& inst : block->Instructions()) {
             if (!inst.HasUses()) {
@@ -37,6 +39,10 @@ void SsaRepairPass(IR::Program& program) {
             const IR::VirtualReg reg{program.next_reg_index++, inst.Type()};
             IR::IREmitter ir{*block, ++IR::Block::InstructionList::s_iterator_to(inst)};
             ir.SetVirtualReg(reg, IR::Value{&inst});
+            mask_scratch.known.clear();
+            if (CarriesLaneMaskBit(inst, invalid_uses, program.scalar_mask_vregs, mask_scratch)) {
+                program.scalar_mask_vregs.insert(reg.Key());
+            }
 
             // Replace all invalid uses with load to virtual register
             for (auto& [user, operand] : invalid_uses) {

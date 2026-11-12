@@ -169,6 +169,26 @@ Id ImageAtomicU32CmpSwap(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords
     const auto [scope, semantics]{AtomicArgs(ctx)};
     return (ctx.*atomic_func)(ctx.U32[1], pointer, scope, semantics, semantics, value, cmp_value);
 }
+// Without native fp32 atomic min/max, a float min/max is an integer atomic on the float bits:
+// SMin/SMax for a positive value, UMax/UMin for a negative one. Both atomics execute, so the one
+// that does not apply is given its identity operand and leaves memory unchanged.
+struct FloatMinMaxOperands {
+    Id sign_bit_set;
+    Id positive_op;
+    Id negative_op;
+};
+
+FloatMinMaxOperands FloatMinMaxArgs(EmitContext& ctx, Id value, bool is_min) {
+    const Id u32_value = ctx.OpBitcast(ctx.U32[1], value);
+    const Id sign_bit_set = ctx.OpINotEqual(
+        ctx.U1[1],
+        ctx.OpBitFieldUExtract(ctx.U32[1], u32_value, ctx.ConstU32(31u), ctx.ConstU32(1u)),
+        ctx.u32_zero_value);
+    const Id signed_identity = ctx.ConstU32(is_min ? 0x7fffffffu : 0x80000000u);
+    const Id unsigned_identity = ctx.ConstU32(is_min ? 0u : 0xffffffffu);
+    return {sign_bit_set, ctx.OpSelect(ctx.U32[1], sign_bit_set, signed_identity, u32_value),
+            ctx.OpSelect(ctx.U32[1], sign_bit_set, u32_value, unsigned_identity)};
+}
 } // Anonymous namespace
 
 Id EmitSharedAtomicIAdd32(EmitContext& ctx, Id offset, Id value) {
@@ -301,18 +321,11 @@ Id EmitBufferAtomicFMin32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id addre
                                      &Sirit::Module::OpAtomicFMin);
     }
 
-    const auto u32_value = ctx.OpBitcast(ctx.U32[1], value);
-    // OpSelect requires a bool condition; produce one by comparing the sign bit to 0.
-    const auto sign_bit_set = ctx.OpINotEqual(
-        ctx.U1[1],
-        ctx.OpBitFieldUExtract(ctx.U32[1], u32_value, ctx.ConstU32(31u), ctx.ConstU32(1u)),
-        ctx.u32_zero_value);
-
-    // FIXME this needs control flow because it currently executes both atomics
+    const auto args = FloatMinMaxArgs(ctx, value, true);
     const auto result = ctx.OpSelect(
-        ctx.F32[1], sign_bit_set,
-        EmitBitCastF32U32(ctx, EmitBufferAtomicUMax32(ctx, inst, handle, address, u32_value)),
-        EmitBitCastF32U32(ctx, EmitBufferAtomicSMin32(ctx, inst, handle, address, u32_value)));
+        ctx.F32[1], args.sign_bit_set,
+        EmitBitCastF32U32(ctx, EmitBufferAtomicUMax32(ctx, inst, handle, address, args.negative_op)),
+        EmitBitCastF32U32(ctx, EmitBufferAtomicSMin32(ctx, inst, handle, address, args.positive_op)));
 
     return result;
 }
@@ -339,18 +352,11 @@ Id EmitBufferAtomicFMax32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id addre
                                      &Sirit::Module::OpAtomicFMax);
     }
 
-    const auto u32_value = ctx.OpBitcast(ctx.U32[1], value);
-    // OpSelect requires a bool condition; produce one by comparing the sign bit to 0.
-    const auto sign_bit_set = ctx.OpINotEqual(
-        ctx.U1[1],
-        ctx.OpBitFieldUExtract(ctx.U32[1], u32_value, ctx.ConstU32(31u), ctx.ConstU32(1u)),
-        ctx.u32_zero_value);
-
-    // FIXME this needs control flow because it currently executes both atomics
+    const auto args = FloatMinMaxArgs(ctx, value, false);
     const auto result = ctx.OpSelect(
-        ctx.F32[1], sign_bit_set,
-        EmitBitCastF32U32(ctx, EmitBufferAtomicUMin32(ctx, inst, handle, address, u32_value)),
-        EmitBitCastF32U32(ctx, EmitBufferAtomicSMax32(ctx, inst, handle, address, u32_value)));
+        ctx.F32[1], args.sign_bit_set,
+        EmitBitCastF32U32(ctx, EmitBufferAtomicUMin32(ctx, inst, handle, address, args.negative_op)),
+        EmitBitCastF32U32(ctx, EmitBufferAtomicSMax32(ctx, inst, handle, address, args.positive_op)));
 
     return result;
 }
@@ -419,17 +425,11 @@ Id EmitImageAtomicFMax32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords
         return ImageAtomicF32(ctx, inst, handle, coords, value, &Sirit::Module::OpAtomicFMax);
     }
 
-    const auto u32_value = ctx.OpBitcast(ctx.U32[1], value);
-    // OpSelect requires a bool condition; produce one by comparing the sign bit to 0.
-    const auto sign_bit_set = ctx.OpINotEqual(
-        ctx.U1[1],
-        ctx.OpBitFieldUExtract(ctx.U32[1], u32_value, ctx.ConstU32(31u), ctx.ConstU32(1u)),
-        ctx.u32_zero_value);
-
+    const auto args = FloatMinMaxArgs(ctx, value, false);
     const auto result = ctx.OpSelect(
-        ctx.F32[1], sign_bit_set,
-        EmitBitCastF32U32(ctx, EmitImageAtomicUMin32(ctx, inst, handle, coords, u32_value)),
-        EmitBitCastF32U32(ctx, EmitImageAtomicSMax32(ctx, inst, handle, coords, u32_value)));
+        ctx.F32[1], args.sign_bit_set,
+        EmitBitCastF32U32(ctx, EmitImageAtomicUMin32(ctx, inst, handle, coords, args.negative_op)),
+        EmitBitCastF32U32(ctx, EmitImageAtomicSMax32(ctx, inst, handle, coords, args.positive_op)));
 
     return result;
 }
@@ -439,17 +439,11 @@ Id EmitImageAtomicFMin32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords
         return ImageAtomicF32(ctx, inst, handle, coords, value, &Sirit::Module::OpAtomicFMin);
     }
 
-    const auto u32_value = ctx.OpBitcast(ctx.U32[1], value);
-    // OpSelect requires a bool condition; produce one by comparing the sign bit to 0.
-    const auto sign_bit_set = ctx.OpINotEqual(
-        ctx.U1[1],
-        ctx.OpBitFieldUExtract(ctx.U32[1], u32_value, ctx.ConstU32(31u), ctx.ConstU32(1u)),
-        ctx.u32_zero_value);
-
+    const auto args = FloatMinMaxArgs(ctx, value, true);
     const auto result = ctx.OpSelect(
-        ctx.F32[1], sign_bit_set,
-        EmitBitCastF32U32(ctx, EmitImageAtomicUMax32(ctx, inst, handle, coords, u32_value)),
-        EmitBitCastF32U32(ctx, EmitImageAtomicSMin32(ctx, inst, handle, coords, u32_value)));
+        ctx.F32[1], args.sign_bit_set,
+        EmitBitCastF32U32(ctx, EmitImageAtomicUMax32(ctx, inst, handle, coords, args.negative_op)),
+        EmitBitCastF32U32(ctx, EmitImageAtomicSMin32(ctx, inst, handle, coords, args.positive_op)));
 
     return result;
 }

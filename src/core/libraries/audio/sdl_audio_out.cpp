@@ -3,8 +3,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <SDL3/SDL_audio.h>
 #include <SDL3/SDL_hints.h>
@@ -13,7 +15,9 @@
 #include "core/emulator_settings.h"
 #include "core/libraries/audio/audioout.h"
 #include "core/libraries/audio/audioout_backend.h"
+#include "core/libraries/audio/surround_virtualizer.h"
 #include "core/libraries/kernel/threads.h"
+#include "core/vr/vr_runtime.h"
 
 // SIMD support detection
 #if defined(__x86_64__) || defined(_M_X64)
@@ -62,6 +66,14 @@ public:
           buffer_frames(port.buffer_frames), sample_rate(port.sample_rate),
           num_channels(port.format_info.num_channels), is_float(port.format_info.is_float),
           is_std(port.format_info.is_std), channel_layout(port.format_info.channel_layout) {
+        // With a headset on, what plays the sound is a pair of speakers at the ears: surround
+        // sound is rendered for that (a title mixes it for where the head points) instead of
+        // being folded down to left and right. SHADPS4_VIRTUAL_SURROUND=0 turns it off.
+        const char* surround = std::getenv("SHADPS4_VIRTUAL_SURROUND");
+        if (num_channels == 8 && Core::Vr::Runtime::Instance().IsHeadsetConnected() &&
+            (surround == nullptr || surround[0] != '0')) {
+            virtualizer.emplace(channel_layout, sample_rate);
+        }
 
         if (!Initialize(port.type)) {
             LOG_ERROR(Lib_AudioOut, "Failed to initialize SDL audio backend");
@@ -83,7 +95,16 @@ public:
 
         UpdateVolumeIfChanged();
         const u64 current_time = Kernel::sceKernelGetProcessTime();
-        convert(ptr, internal_buffer, buffer_frames, nullptr);
+        if (virtualizer) {
+            auto* const stereo = static_cast<float*>(internal_buffer);
+            if (is_float) {
+                virtualizer->Process(static_cast<const float*>(ptr), buffer_frames, stereo);
+            } else {
+                virtualizer->Process(static_cast<const s16*>(ptr), buffer_frames, stereo);
+            }
+        } else {
+            convert(ptr, internal_buffer, buffer_frames, nullptr);
+        }
         HandleTiming(current_time);
 
         if ((output_count++ & 0xF) == 0) { // Check every 16 outputs
@@ -140,7 +161,7 @@ private:
         period_us = (1000000ULL * buffer_frames + sample_rate / 2) / sample_rate;
 
         // Allocate aligned internal buffer for SIMD operations
-        internal_buffer_size = buffer_frames * sizeof(float) * num_channels;
+        internal_buffer_size = buffer_frames * sizeof(float) * (virtualizer ? 2 : num_channels);
 
 #ifdef _WIN32
         internal_buffer = _aligned_malloc(internal_buffer_size, AUDIO_BUFFER_ALIGNMENT);
@@ -266,7 +287,7 @@ private:
 
         const SDL_AudioSpec fmt = {
             .format = SDL_AUDIO_F32LE,
-            .channels = static_cast<u8>(num_channels),
+            .channels = static_cast<u8>(virtualizer ? 2 : num_channels),
             .freq = static_cast<int>(sample_rate),
         };
 
@@ -278,7 +299,7 @@ private:
         }
 
         SDL_AudioSpec dev_spec{};
-        if (num_channels >= 6 &&
+        if (!virtualizer && num_channels >= 6 &&
             SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(stream), &dev_spec, nullptr) &&
             dev_spec.channels >= 1 && dev_spec.channels <= 2) {
             ps4_downmix = true;
@@ -300,7 +321,7 @@ private:
         }
 
         // Configure channel mapping (input is already stereo when folding)
-        if (!ps4_downmix && !ConfigureChannelMap()) {
+        if (!ps4_downmix && !virtualizer && !ConfigureChannelMap()) {
             SDL_DestroyAudioStream(stream);
             stream = nullptr;
             return false;
@@ -633,6 +654,7 @@ private:
     // Set when the output device is stereo and we fold 5.1/7.1 ourselves.
     bool ps4_downmix{false};
     const std::array<int, 8> channel_layout;
+    std::optional<SurroundVirtualizer> virtualizer;
 
     alignas(64) u64 period_us{0};
     alignas(64) std::atomic<u64> last_output_time{0};

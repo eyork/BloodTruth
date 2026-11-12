@@ -1,11 +1,19 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <condition_variable>
+#include <cstdlib>
+#include <deque>
+#include <functional>
+#include <mutex>
 #include <ranges>
+#include <thread>
 
 #include "common/hash.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
+#include "common/polyfill_thread.h"
+#include "common/thread.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
@@ -268,6 +276,55 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
     return info;
 }
 
+class PipelineCompiler {
+public:
+    explicit PipelineCompiler(u32 num_threads) {
+        for (u32 i = 0; i < num_threads; ++i) {
+            workers.emplace_back([this](std::stop_token stop_token) { Run(stop_token); });
+        }
+    }
+
+    ~PipelineCompiler() {
+        for (auto& worker : workers) {
+            worker.request_stop();
+        }
+        for (auto& worker : workers) {
+            worker.join();
+        }
+    }
+
+    void Submit(std::function<void()> job) {
+        {
+            std::scoped_lock lock{mutex};
+            jobs.push_back(std::move(job));
+        }
+        cv.notify_one();
+    }
+
+private:
+    void Run(std::stop_token stop_token) {
+        Common::SetCurrentThreadName("shadPS4:PipelineCompiler");
+        while (true) {
+            std::function<void()> job;
+            {
+                std::unique_lock lock{mutex};
+                Common::CondvarWait(cv, lock, stop_token, [this] { return !jobs.empty(); });
+                if (stop_token.stop_requested()) {
+                    return;
+                }
+                job = std::move(jobs.front());
+                jobs.pop_front();
+            }
+            job();
+        }
+    }
+
+    std::mutex mutex;
+    std::condition_variable_any cv;
+    std::deque<std::function<void()>> jobs;
+    std::vector<std::jthread> workers;
+};
+
 PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
                              AmdGpu::Liverpool* liverpool_, u32 sparse_page_shift)
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
@@ -335,12 +392,197 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     pipeline_cache = std::move(cache);
 }
 
-PipelineCache::~PipelineCache() = default;
+static bool AsyncPipelinesEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_ASYNC_PIPELINES");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
 
-const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params) {
+static bool AsyncPipelineSkipEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_ASYNC_PIPELINE_SKIP");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+static u32 AsyncPipelineThreads() {
+    static const u32 threads = [] {
+        if (const char* value = std::getenv("SHADPS4_ASYNC_PIPELINE_THREADS")) {
+            return std::clamp<u32>(static_cast<u32>(std::strtoul(value, nullptr, 10)), 1, 8);
+        }
+        return std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u);
+    }();
+    return threads;
+}
+
+static constexpr u32 FullScreenPassIndices = 12;
+static constexpr u32 PerFrameTargetStreak = 8;
+static constexpr u32 MinDrawsPerFrame = 300;
+static constexpr size_t MaxTrackedTargets = 4096;
+
+static VAddr ColorTarget(const AmdGpu::Regs& regs) {
+    if (regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Disable) {
+        return 0;
+    }
+    for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
+        if (regs.color_buffers[cb] && regs.color_target_mask.GetMask(cb)) {
+            return regs.color_buffers[cb].Address();
+        }
+    }
+    return 0;
+}
+
+
+
+struct PipelineCache::PendingPipeline {
+    GraphicsPipelineKey key{};
+    std::array<Shader::RuntimeInfo, MaxShaderStages> runtime_infos{};
+    std::array<const Shader::Info*, MaxShaderStages> infos{};
+    std::array<vk::ShaderModule, MaxShaderStages> modules{};
+    std::optional<Shader::Gcn::FetchShaderData> fetch_shader{};
+    GraphicsPipeline::DescBindings desc_bindings{};
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool done{};
+    std::unique_ptr<GraphicsPipeline> pipeline;
+    GraphicsPipeline::SerializationSupport sdata{};
+
+    bool IsDone() {
+        std::scoped_lock lock{mutex};
+        return done;
+    }
+
+    void Wait() {
+        std::unique_lock lock{mutex};
+        cv.wait(lock, [this] { return done; });
+    }
+};
+
+PipelineCache::~PipelineCache() {
+    compiler.reset();
+}
+
+bool PipelineCache::IsAsyncEnabled() const {
+    return AsyncPipelinesEnabled() && instance.IsVertexInputDynamicState() &&
+           !EmulatorSettings.IsShaderCollect();
+}
+
+void PipelineCache::TrackDrawTarget() {
+    const VAddr target = ColorTarget(liverpool->regs);
+    if (target == 0) {
+        return;
+    }
+    if (target_streaks.size() > MaxTrackedTargets) {
+        target_streaks.clear();
+    }
+    auto& streak = target_streaks[target];
+    if (streak.last_frame != frame_number) {
+        streak.frames = streak.last_frame + 1 == frame_number ? streak.frames + 1 : 1;
+        streak.last_frame = frame_number;
+    }
+}
+
+bool PipelineCache::IsDrawSkippable(bool indirect) const {
+    if (!AsyncPipelineSkipEnabled() || indirect || draws_last_frame < MinDrawsPerFrame) {
+        return false;
+    }
+    const auto& regs = liverpool->regs;
+    if (regs.num_indices <= FullScreenPassIndices) {
+        return false;
+    }
+    const VAddr target = ColorTarget(regs);
+    const auto it = target_streaks.find(target);
+    return target != 0 && it != target_streaks.end() && it->second.frames >= PerFrameTargetStreak;
+}
+
+void PipelineCache::TickFrame() {
+    ++frame_number;
+    draws_last_frame = draws_this_frame;
+    draws_this_frame = 0;
+    std::vector<GraphicsPipelineKey> finished;
+    for (const auto& [key, job] : pending_pipelines) {
+        if (job->IsDone()) {
+            FinishPipeline(key, *job);
+            finished.push_back(key);
+        }
+    }
+    for (const auto& key : finished) {
+        pending_pipelines.erase(key);
+    }
+}
+
+const GraphicsPipeline* PipelineCache::GetGraphicsPipelineAsync(bool indirect) {
+    const bool skippable = IsDrawSkippable(indirect);
+    std::shared_ptr<PendingPipeline> job;
+    if (const auto it = pending_pipelines.find(graphics_key); it != pending_pipelines.end()) {
+        job = it->second;
+    } else {
+        job = std::make_shared<PendingPipeline>();
+        job->key = graphics_key;
+        job->runtime_infos = runtime_infos;
+        job->infos = infos;
+        job->modules = modules;
+        if (fetch_shader) {
+            job->fetch_shader = *fetch_shader;
+        }
+        job->desc_bindings = GraphicsPipeline::GetDescBindings(infos, false);
+        pending_pipelines.emplace(graphics_key, job);
+        if (!compiler) {
+            compiler = std::make_unique<PipelineCompiler>(AsyncPipelineThreads());
+        }
+        LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x} in the background",
+                 std::hash<GraphicsPipelineKey>{}(graphics_key));
+        compiler->Submit([this, job] {
+            GraphicsPipeline::SerializationSupport sdata{};
+            auto pipeline = std::make_unique<GraphicsPipeline>(
+                instance, scheduler, desc_heap, profile, job->key, *pipeline_cache, job->infos,
+                job->runtime_infos, job->fetch_shader ? &*job->fetch_shader : nullptr,
+                job->modules, sdata, false, &job->desc_bindings);
+            {
+                std::scoped_lock lock{job->mutex};
+                job->pipeline = std::move(pipeline);
+                job->sdata = std::move(sdata);
+                job->done = true;
+            }
+            job->cv.notify_all();
+        });
+    }
+    if (!job->IsDone()) {
+        if (skippable) {
+            return nullptr;
+        }
+        job->Wait();
+    }
+    pending_pipelines.erase(graphics_key);
+    return FinishPipeline(graphics_key, *job);
+}
+
+const GraphicsPipeline* PipelineCache::FinishPipeline(const GraphicsPipelineKey& key,
+                                                      PendingPipeline& job) {
+    RegisterPipelineData(key, std::hash<GraphicsPipelineKey>{}(key), job.sdata);
+    ++num_new_pipelines;
+    auto& slot = graphics_pipelines[key];
+    slot = std::move(job.pipeline);
+    return slot.get();
+}
+
+const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
+                                                           bool indirect) {
     draw_indirect_params = params;
+    const bool async = IsAsyncEnabled();
+    if (async) {
+        ++draws_this_frame;
+        TrackDrawTarget();
+    }
     if (!RefreshGraphicsKey()) {
         return nullptr;
+    }
+    if (async && !graphics_pipelines.contains(graphics_key)) {
+        return GetGraphicsPipelineAsync(indirect);
     }
     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
     if (is_new) {

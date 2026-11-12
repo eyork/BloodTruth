@@ -712,11 +712,19 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
         vk::AccessFlagBits2::eDepthStencilAttachmentWrite | vk::AccessFlagBits2::eTransferWrite |
         vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eTransformFeedbackWriteEXT;
 
+    constexpr static std::size_t MAX_TRACKED_RANGES = 64;
+
+    const auto track = [&](BufferBarriers::AccessList& ranges) {
+        ranges.Add(range);
+        if (ranges.Size() > MAX_TRACKED_RANGES) {
+            ranges.CollapseToHull();
+        }
+    };
     if (src_access & WRITE_MASK) {
-        resource->write_ranges.Add(range);
+        track(resource->write_ranges);
     }
     if (src_access & READ_MASK) {
-        resource->read_ranges.Add(range);
+        track(resource->read_ranges);
     }
 
     memory_barrier.srcStageMask |= src_stage;

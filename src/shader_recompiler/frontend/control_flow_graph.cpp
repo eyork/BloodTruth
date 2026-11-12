@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "shader_recompiler/frontend/control_flow_graph.h"
@@ -22,6 +23,34 @@ struct Compare {
         return lhs.begin < rhs.begin;
     }
 };
+
+static bool EnterWholeWaveRegions() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_WWM_ENTER");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
+static bool EnablesWholeWave(const GcnInst& inst) {
+    return inst.opcode == Opcode::S_ORN2_SAVEEXEC_B64 &&
+           inst.src[0].field == OperandField::ExecLo;
+}
+
+static bool IsWholeWaveSafe(const GcnInst& inst) {
+    switch (inst.category) {
+    case InstCategory::ScalarALU:
+    case InstCategory::ScalarMemory:
+    case InstCategory::VectorALU:
+        return true;
+    case InstCategory::DataShare:
+        return inst.opcode == Opcode::DS_SWIZZLE_B32;
+    case InstCategory::FlowControl:
+        return inst.opcode == Opcode::S_WAITCNT || inst.opcode == Opcode::S_NOP;
+    default:
+        return false;
+    }
+}
 
 static IR::Condition MakeCondition(const GcnInst& inst) {
     if (inst.IsCmpx()) {
@@ -352,6 +381,23 @@ void CFG::LinkBlocks() {
         } else if (end_inst.IsConditionalBranch()) {
             auto* end_block = get_block(block.end);
             block.end_class = EndClass::Branch;
+            if (EnterWholeWaveRegions() && end_inst.opcode == Opcode::S_CBRANCH_EXECZ &&
+                target_pc > block.end) {
+                const size_t first = block.end_index + 1;
+                size_t last = first;
+                while (last < inst_list.size() && index_to_pc[last] < target_pc) {
+                    ++last;
+                }
+                const auto region = inst_list.subspan(first, last - first);
+                if (std::ranges::any_of(region, EnablesWholeWave) &&
+                    std::ranges::all_of(region, IsWholeWaveSafe)) {
+                    LOG_INFO(Render_Recompiler,
+                             "Exec-skip region {:#x}..{:#x} enables the whole wave: "
+                             "skipping it only when no lane is active",
+                             block.end, target_pc);
+                    block.cond = IR::Condition::ExeczWave;
+                }
+            }
             if (target_pc != block.end) {
                 auto* target_block = get_block(target_pc);
                 block.branch_true = target_block;

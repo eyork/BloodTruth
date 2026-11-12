@@ -302,7 +302,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         .vertex_sgpr_offset = vertex_sgpr_offset,
         .instance_sgpr_offset = instance_sgpr_offset,
     };
-    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline(params);
+    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline(params, true);
     if (!pipeline) {
         return;
     }
@@ -368,6 +368,31 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     ResetBindings(false);
 }
 
+namespace {
+
+bool DispatchBarrier() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_DISPATCH_BARRIER");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
+void MakeDispatchWritesVisible(vk::CommandBuffer cmdbuf) {
+    const vk::MemoryBarrier2 barrier = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+        .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+    };
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .memoryBarrierCount = 1,
+        .pMemoryBarriers = &barrier,
+    });
+}
+
+} // namespace
+
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
 
@@ -398,6 +423,9 @@ void Rasterizer::DispatchDirect() {
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
+    if (DispatchBarrier()) {
+        MakeDispatchWritesVisible(cmdbuf);
+    }
     DebugState.IncDispatch();
 
     ResetBindings(true);
@@ -432,6 +460,9 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
+    if (DispatchBarrier()) {
+        MakeDispatchWritesVisible(cmdbuf);
+    }
     DebugState.IncDispatch();
 
     ResetBindings(true);
@@ -449,6 +480,7 @@ void Rasterizer::Finish() {
 }
 
 void Rasterizer::OnSubmit() {
+    pipeline_cache.TickFrame();
     buffer_cache.TickFrame();
     texture_cache.ProcessDownloadImages();
     texture_cache.RunGarbageCollector();

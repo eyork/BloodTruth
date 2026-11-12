@@ -42,6 +42,10 @@ public:
     void Discard(const U1& cond);
     void DebugPrint(const char* fmt, boost::container::small_vector<Value, 5> args);
 
+    void PredicatedBegin(const U1& cond);
+    void PredicatedEnd();
+    [[nodiscard]] Value PredicatedEnd(const Value& value);
+    void LdsBarrier();
     void Barrier();
     void WorkgroupMemoryBarrier();
     void DeviceMemoryBarrier();
@@ -176,13 +180,15 @@ public:
     [[nodiscard]] U32 QuadBroadcast(const U32& value, const U32& index);
     [[nodiscard]] U32 Shuffle(const U32& value, const U32& index);
     [[nodiscard]] U32 ShuffleXor(const U32& value, const U32& mask);
-    [[nodiscard]] U32 ReadFirstLane(const U32& value);
+    [[nodiscard]] U32 ReadFirstLane(const U32& value, const U1& exec);
     [[nodiscard]] U32 ReadLane(const U32& value, const U32& lane);
     [[nodiscard]] U32 WriteLane(const U32& value, const U32& write_value, const U32& lane);
     [[nodiscard]] U64 Ballot(const U1& bit);
     [[nodiscard]] U32 BallotFindLsb(const U64& mask);
     [[nodiscard]] U1 InverseBallot(const U64& mask);
     [[nodiscard]] U1 GroupAny(const U1& bit);
+    [[nodiscard]] U1 WorkgroupAny(const U1& bit);
+    [[nodiscard]] U1 WaveAny(const U1& bit);
 
     [[nodiscard]] Value CompositeConstruct(const Value& e1, const Value& e2);
     [[nodiscard]] Value CompositeConstruct(const Value& e1, const Value& e2, const Value& e3);

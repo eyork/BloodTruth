@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <stop_token>
 #include <thread>
+#include <vector>
 #include <fmt/format.h>
 #include <magic_enum/magic_enum.hpp>
 
@@ -18,6 +20,7 @@
 #include "core/libraries/audio/audioout_error.h"
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/libs.h"
+#include "core/vr/vr_runtime.h"
 
 namespace Libraries::AudioOut {
 
@@ -171,9 +174,16 @@ static void AudioOutputThread(std::shared_ptr<PortOut> port, const std::stop_tok
     Common::AccurateTimer timer(
         std::chrono::nanoseconds(1000000000ULL * port->buffer_frames / port->sample_rate));
 
+    // With a headset as the display, the AUX port carries the television mix for onlookers;
+    // the wearer hears the main port, and playing both doubles every sound.
+    const bool muted =
+        port->type == OrbisAudioOutPort::Aux && Core::Vr::Runtime::Instance().IsHeadsetConnected();
+    std::vector<u8> playing(port->BufferSize());
+
     while (true) {
         timer.Start();
 
+        bool have_buffer = false;
         {
             std::unique_lock lock{port->mutex};
             if (!port->impl || stop.stop_requested()) {
@@ -181,7 +191,8 @@ static void AudioOutputThread(std::shared_ptr<PortOut> port, const std::stop_tok
             }
 
             if (port->output_ready) {
-                port->impl->Output(port->output_buffer);
+                std::memcpy(playing.data(), port->output_buffer, playing.size());
+                have_buffer = true;
                 port->output_ready = false;
                 port->last_output_time =
                     Kernel::sceKernelGetProcessTime(); // moved from sceAudioOutOutput TOOD recheck
@@ -189,6 +200,13 @@ static void AudioOutputThread(std::shared_ptr<PortOut> port, const std::stop_tok
         }
 
         port->output_cv.notify_all();
+
+        if (have_buffer) {
+            if (muted) {
+                std::memset(playing.data(), 0, playing.size());
+            }
+            port->impl->Output(playing.data());
+        }
 
         if (stop.stop_requested()) {
             break;

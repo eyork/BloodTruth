@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <boost/container/small_vector.hpp>
 #include <boost/container/static_vector.hpp>
 #include <xxhash.h>
 
@@ -83,6 +84,11 @@ public:
         bool Deserialize(Serialization::Archive& ar);
     };
 
+    using DescBindings = boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32>;
+
+    static DescBindings GetDescBindings(std::span<const Shader::Info* const, MaxShaderStages> stages,
+                                        bool preloading);
+
     GraphicsPipeline(const Instance& instance, Scheduler& scheduler, DescriptorHeap& desc_heap,
                      const Shader::Profile& profile, const GraphicsPipelineKey& key,
                      vk::PipelineCache pipeline_cache,
@@ -90,7 +96,7 @@ public:
                      std::span<const Shader::RuntimeInfo, MaxShaderStages> runtime_infos,
                      const Shader::Gcn::FetchShaderData* fetch_shader,
                      std::span<const vk::ShaderModule> modules, SerializationSupport& sdata,
-                     bool preloading);
+                     bool preloading, const DescBindings* desc_bindings = nullptr);
     ~GraphicsPipeline();
 
     const Shader::Gcn::FetchShaderData& GetFetchShader() const noexcept {
@@ -109,7 +115,7 @@ public:
                          u32 step_rate_1) const;
 
 private:
-    void BuildDescSetLayout(bool preloading);
+    void BuildDescSetLayout(const DescBindings& bindings);
 
 private:
     GraphicsPipelineKey key;

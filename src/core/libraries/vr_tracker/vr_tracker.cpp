@@ -11,6 +11,7 @@
 
 #include "common/elf_info.h"
 #include "common/logging/log.h"
+#include "core/bloodtruth_title.h"
 
 #include "core/libraries/error_codes.h"
 #include "core/libraries/kernel/time.h"
@@ -363,6 +364,7 @@ s32 PS4_SYSV_ABI sceVrTrackerGetResult(const OrbisVrTrackerGetResultParam* param
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
     }
+    Core::BloodTruth::Tick();
     static std::atomic<unsigned> diagnostics{};
     if (diagnostics.fetch_add(1) < 8 && param) {
         LOG_INFO(Lib_VrTracker, "Tracker request: size {} expected {}, handle {}, type {}",

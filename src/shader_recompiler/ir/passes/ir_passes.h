@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include "shader_recompiler/ir/basic_block.h"
 #include "shader_recompiler/ir/passes/resource_pass.h"
 #include "shader_recompiler/ir/program.h"
@@ -12,12 +14,35 @@ struct Profile;
 void InjectClipDistanceAttributes(IR::Program& program, RuntimeInfo& runtime_info);
 } // namespace Shader
 
+namespace Shader::IR {
+class IREmitter;
+}
+
 namespace Shader::Optimization {
+
+// PS4Recomp: the VGPR a cross-lane read reads, recorded by the translator in the instruction's
+// flags (index + 1; 0: not recorded). A lane outside EXEC keeps that register's old value.
+inline void SetLaneSourceVgpr(const IR::Value& read, IR::VectorReg vgpr) {
+    read.Inst()->SetFlags<u32>(static_cast<u32>(vgpr) + 1);
+}
+inline std::optional<IR::VectorReg> LaneSourceVgpr(const IR::Inst& read) {
+    const u32 flags = read.Flags<u32>();
+    return flags == 0 ? std::nullopt : std::optional{static_cast<IR::VectorReg>(flags - 1)};
+}
+
+void PredicateWave64Pass(IR::Program& program, const RuntimeInfo& runtime_info,
+                         const Profile& profile);
+void LowerWaveOpsPass(IR::Program& program, const RuntimeInfo& runtime_info,
+                      const Profile& profile);
+IR::U32 ComputeWaveLane(IR::IREmitter& ir);
 
 void SsaRewritePass(IR::Program& program);
 void SsaRepairPass(IR::Program& program);
 void PhiSimplificationPass(IR::Program& program);
 void InverseBallotEliminationPass(IR::Program& program);
+void HoistWave64CrossLaneOpsPass(IR::Program& program, Common::ObjectPool<IR::Block>& block_pool,
+                                 Common::ObjectPool<IR::Inst>& inst_pool,
+                                 const RuntimeInfo& runtime_info, const Profile& profile);
 void LowerWave64BallotPass(IR::Program& program, const RuntimeInfo& runtime_info,
                            const Profile& profile);
 void LowerHardwareIntrinsics(IR::Program& program);
