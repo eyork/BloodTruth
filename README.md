@@ -6,7 +6,7 @@ An experimental Windows OpenXR port based on shadPS4, with integration work inhe
 
 Local testing reached gameplay after calibration. Two tracked controllers and corrected hand mapping are implemented. Original, High (1440 x 1632 per eye), and Ultra (8x original pixel count) resolution options are available. Shader resource metadata, depth/stencil handling, GPU memory tracking, audio and VR compatibility fixes are included.
 
-**Known problems:** geometry and textures can disappear or pop in and out, including walls and hands. Loading stalls and crashes remain possible. Higher resolutions are experimental. This release does not claim to resolve these remaining issues. The release executable is rebuilt from the published source; it has not received a fresh headset gameplay test.
+**Known problems:**  If when you run the game it gets stuck on loading simply close and re-open the game(it should load).  Higher resolutions are experimental and may need a more powerful GPU.  The release executable is rebuilt from the published source. I have played it for a few hours in the headset. You may see some images disappear but this should be fewer now.
 
 ## First installation
 
