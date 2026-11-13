@@ -62,13 +62,20 @@ if (-not $env:SHADPS4_VR_SHARPEN) { $env:SHADPS4_VR_SHARPEN='0.3' }; if (-not $e
 $env:SHADPS4_INPUT_SCRIPT=''; $env:SHADPS4_LIVE_INPUT=''
 $env:SHADPS4_XR_TEST_PRESS=''; $env:SHADPS4_XR_TEST_TURN=''
 # The pipeline cache stores translated shaders but only checks the GPU profile, so wipe it whenever
-# the emulator build or a setting that changes shader translation differs from the last launch.
+# shader translation changes: a setting that affects it, or a build that does (raise $shaderCacheVersion
+# then). Every pipeline in the cache is built again at boot, before the game starts.
+$shaderCacheVersion='shader-cache=1'
 $cacheDir=Join-Path $PSScriptRoot 'user/cache'
 $stampPath=Join-Path $cacheDir 'shader-settings.stamp'
-$stamp=((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash,
- (Get-ChildItem env: | Where-Object { $_.Name -like 'SHADPS4_WAVE64*' -or $_.Name -like 'SHADPS4_WWM*' } | Sort-Object Name | ForEach-Object { $_.Name+'='+$_.Value })) -join "`n"
-if ((Test-Path -LiteralPath $stampPath) -and (Get-Content -LiteralPath $stampPath -Raw).TrimEnd() -ne $stamp.TrimEnd()) {
- Get-ChildItem -LiteralPath $cacheDir -Exclude 'shader-settings.stamp' | Remove-Item -Recurse -Force
+$stamp=(@($shaderCacheVersion)+
+ @(Get-ChildItem env: | Where-Object { $_.Name -like 'SHADPS4_WAVE64*' -or $_.Name -like 'SHADPS4_WWM*' } | Sort-Object Name | ForEach-Object { $_.Name+'='+$_.Value })) -join "`n"
+if (Test-Path -LiteralPath $stampPath) {
+ $oldStamp=@((Get-Content -LiteralPath $stampPath -Raw).TrimEnd() -split "`r?`n")
+ # Stamps written before the cache version began with the exe's hash.
+ if ($oldStamp[0] -match '^[0-9A-F]{64}$') { $oldStamp[0]=$shaderCacheVersion }
+ if (($oldStamp -join "`n") -ne $stamp) {
+  Get-ChildItem -LiteralPath $cacheDir -Exclude 'shader-settings.stamp' | Remove-Item -Recurse -Force
+ }
 }
 New-Item -ItemType Directory -Force $cacheDir | Out-Null
 Set-Content -LiteralPath $stampPath -Value $stamp

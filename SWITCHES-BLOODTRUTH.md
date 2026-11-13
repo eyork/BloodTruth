@@ -50,9 +50,12 @@ wide; these switches control how the emulator makes those shaders behave as on a
 | `SHADPS4_HMD_END_EVENT_DELAY_US` | `2000` (launcher) | delay between the headset's reprojection start/end events; fixes the game counting every second refresh (18 -> 31+ fps) |
 | `SHADPS4_SUBMIT_ORDER`, `SHADPS4_ASC_RELEASE_FINISH`, `SHADPS4_DISPATCH_BARRIER` | `0` | diagnostics from the culling hunt (ordering and barrier experiments); leave off |
 
-The shader disk cache is on (`pipeline_cache_enabled` in `user/config.json`). The launcher empties
-`user/cache` when `shadps4.exe` or any `SHADPS4_WAVE64*` / `SHADPS4_WWM*` setting changes, because the cache
-does not know about them; the first run after that compiles again.
+The shader disk cache is on (`pipeline_cache_enabled` in `user/config.json`). It records every pipeline the
+game has used, and at every boot all of them are built before the game starts, so a scene you have played
+once does not compile again. The launcher empties `user/cache` only when a `SHADPS4_WAVE64*` /
+`SHADPS4_WWM*` setting changes (the cache does not know about them) or when a build changes shader
+translation (`$shaderCacheVersion` in the launcher). Pick one `SHADPS4_WAVE64_HOIST` value and keep it, or the
+cache starts over.
 
 ## Picture
 
