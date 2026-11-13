@@ -137,6 +137,13 @@ void DataBase::Close() {
     LOG_INFO(Render, "Cache dumped");
 }
 
+void DataBase::Clear() {
+    Close();
+    std::error_code ec;
+    std::filesystem::remove_all(cache_path, ec);
+    Open();
+}
+
 template <typename T>
 bool WriteVector(const BlobType type, std::filesystem::path&& path_, std::vector<T>&& v) {
     {

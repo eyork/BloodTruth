@@ -57,6 +57,25 @@ once does not compile again. The launcher empties `user/cache` only when a `SHAD
 translation (`$shaderCacheVersion` in the launcher). Pick one `SHADPS4_WAVE64_HOIST` value and keep it, or the
 cache starts over.
 
+### Sharing the shader cache
+
+A playthrough's cache can be given to other players, so scenes they have never visited do not have to
+compile (and lose parts while they do). The export is small: a 555 MB cache zips to about 19 MB.
+
+```powershell
+cd <repo>\bloodtruth-launcher
+.\shader-cache.ps1 -Export bloodtruth-shaders.zip   # the player who played through
+.\shader-cache.ps1 -Import bloodtruth-shaders.zip   # anyone else; prints the settings to start with
+```
+
+- Importing on top of a cache from the same GPU and settings adds the new pipelines to it. A cache from a
+  different GPU or other settings is moved to `user/cache-backup-<date>`, not deleted.
+- The cache holds shaders already translated for the GPU that made it (`profile.bin`). It helps players with a
+  GPU that translates the same way, in practice the same vendor and family (for example two recent NVIDIA
+  cards). On any other GPU the emulator notices at boot and starts a fresh cache of its own.
+- Start the game with the same `SHADPS4_WAVE64*` settings the export was made with (the import prints them),
+  or the launcher clears the cache.
+
 ## Picture
 
 | Switch | Default | What it does |
