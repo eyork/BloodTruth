@@ -149,6 +149,8 @@ struct Port {
     std::deque<AudioData> mixed_queue;
     // Working memory and state of the mix.
     std::vector<float> mix_buffer;
+    std::vector<float> bed_channel;
+    std::array<Spatializer, 4> bed_surrounds;
     float limiter_gain{1.0f};
     u64 advance_count{};
 };

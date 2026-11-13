@@ -75,6 +75,8 @@ does not know about them; the first run after that compiles again.
 
 3D sound objects (voices, effects) are placed around the head with a head model (`audio3d.cpp`,
 `audio3d_spatializer.cpp`); the speaker-array functions the game's Wwise engine uses are implemented.
+The game's 5.1/7.1 speaker bed is played in full: centre and LFE in both ears, surround channels placed to
+the sides and behind (`SHADPS4_AUDIO3D_MIXDOWN=1` folds them flat instead).
 
 ## VR runtime (from evertec's build, unchanged)
 

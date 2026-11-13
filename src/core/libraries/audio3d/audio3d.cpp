@@ -56,6 +56,15 @@ static float ObjectGain() {
     return gain;
 }
 
+/// Where the surround channels of a bed sit around the listener (+X right, +Z behind): side
+/// speakers at 110 degrees, back speakers at 150 degrees.
+static constexpr std::array<std::array<float, 2>, 4> BED_SURROUND_POSITIONS{{
+    {-0.940f, 0.342f},
+    {0.940f, 0.342f},
+    {-0.500f, 0.866f},
+    {0.500f, 0.866f},
+}};
+
 static void ResetObject(ObjectState& obj) {
     obj.pcm.clear();
     obj.has_pcm = false;
@@ -664,9 +673,38 @@ s32 PS4_SYSV_ABI sceAudio3dPortAdvance(const OrbisAudio3dPortId port_id) {
             return is_s16 ? reinterpret_cast<const s16*>(data.sample_buffer)[at] / 32768.0f
                           : reinterpret_cast<const float*>(data.sample_buffer)[at];
         };
+        constexpr float Half = 0.7071f;
         for (u32 i = 0; i < frames; i++) {
             mix[i * 2 + 0] += sample(i, 0);
             mix[i * 2 + 1] += sample(i, channels > 1 ? 1 : 0);
+        }
+        if (channels >= 6) {
+            // Centre (where dialogue usually is) and LFE reach both ears equally.
+            for (u32 i = 0; i < frames; i++) {
+                const float middle = sample(i, 2) * Half + sample(i, 3) * 0.5f;
+                mix[i * 2 + 0] += middle;
+                mix[i * 2 + 1] += middle;
+            }
+            port.bed_channel.resize(frames);
+            for (u32 surround = 0; surround + 4 < channels && surround < 4; surround++) {
+                const u32 channel = surround + 4;
+                const u32 side = surround % 2;
+                if (MixdownEnabled()) {
+                    for (u32 i = 0; i < frames; i++) {
+                        mix[i * 2 + side] += sample(i, channel) * Half;
+                    }
+                    continue;
+                }
+                for (u32 i = 0; i < frames; i++) {
+                    port.bed_channel[i] = sample(i, channel);
+                }
+                const ObjectPlacement placement{.x = BED_SURROUND_POSITIONS[surround][0],
+                                                .z = BED_SURROUND_POSITIONS[surround][1],
+                                                .gain = 1.0f};
+                port.bed_surrounds[surround].Process(port.bed_channel.data(), frames, mix,
+                                                     placement,
+                                                     static_cast<float>(AUDIO3D_SAMPLE_RATE));
+            }
         }
         std::free(data.sample_buffer);
     }
