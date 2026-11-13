@@ -79,6 +79,32 @@ does not know about them; the first run after that compiles again.
 The game's 5.1/7.1 speaker bed is played in full: centre and LFE in both ears, surround channels placed to
 the sides and behind (`SHADPS4_AUDIO3D_MIXDOWN=1` folds them flat instead).
 
+### How the game's sound reaches you
+
+- The game's Wwise engine sends two things through Audio3d: **3D objects** (voices, gunfire, effects, each with
+  a position) and a **5.1/7.1 speaker bed** (music, ambience, and the centre channel where radio/comms dialogue
+  usually sits).
+- **Virtual Desktop and the Quest just carry stereo.** Neither places sounds around you; the emulator turns
+  everything into a left-ear/right-ear signal with a head model, and that stereo is what streams to the headset.
+  Don't enable Windows Sonic or Dolby Atmos for Headphones on top: that would process it twice.
+- **Head tracking:** the game gives object positions relative to your body, not your head (on a PS4 the system
+  applied the head's turn). Checked in the Meta XR Simulator: after a 100-degree head turn the game's positions
+  did not change at all. The emulator now rotates every object by the headset's orientation, so a sound in front
+  moves to your right ear when you look left. "Straight ahead" is where you faced when the game started; hold
+  OPTIONS in the game to recenter.
+- **Earlier bug (fixed):** only the bed's front left/right channels were played, so radio voices (centre) and
+  sounds behind you (surrounds) were missing.
+
+### If the sound is wrong
+
+| Symptom | Try |
+|---|---|
+| Voices or effects too quiet next to music | `SHADPS4_AUDIO3D_OBJECT_GAIN=1.5` |
+| Some sounds missing or muffled from one side | `SHADPS4_AUDIO3D_MIXDOWN=1` (no direction; if they are still missing, the game is not sending them) |
+| Sounds move with your head | check `SHADPS4_AUDIO3D_HEAD_TRACKING` is not `0`; recenter with OPTIONS |
+| Want the ambience to stay in the room too | `SHADPS4_AUDIO3D_HEAD_TRACKING=2` (radio and music will move as you turn) |
+| Sound directions mirrored or rotated | report it with `SHADPS4_AUDIO3D_TRACE=1` and the log |
+
 ## VR runtime (from evertec's build, unchanged)
 
 `SHADPS4_VR`, `SHADPS4_OPENXR` (launcher sets both), `SHADPS4_XR_*` (controllers, pacing, test input),
