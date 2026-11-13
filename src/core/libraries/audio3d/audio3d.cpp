@@ -17,6 +17,7 @@
 #include "core/libraries/audio3d/audio3d_error.h"
 #include "core/libraries/error_codes.h"
 #include "core/libraries/libs.h"
+#include "core/vr/vr_runtime.h"
 
 namespace Libraries::Audio3d {
 
@@ -56,13 +57,29 @@ static float ObjectGain() {
     return gain;
 }
 
-/// Where the surround channels of a bed sit around the listener (+X right, +Z behind): side
-/// speakers at 110 degrees, back speakers at 150 degrees.
-static constexpr std::array<std::array<float, 2>, 4> BED_SURROUND_POSITIONS{{
-    {-0.940f, 0.342f},
-    {0.940f, 0.342f},
-    {-0.500f, 0.866f},
-    {0.500f, 0.866f},
+/// SHADPS4_AUDIO3D_HEAD_TRACKING: 1 (default) keeps objects where they are as the head turns,
+/// 2 the bed's speakers too, 0 turns sound with the head.
+static u32 HeadTracking() {
+    static const u32 mode = [] {
+        const char* value = std::getenv("SHADPS4_AUDIO3D_HEAD_TRACKING");
+        return value != nullptr && *value != '\0'
+                   ? static_cast<u32>(std::strtoul(value, nullptr, 10))
+                   : 1u;
+    }();
+    return mode;
+}
+
+/// Where the channels of a bed sit around the listener (+X right, +Z behind), in the order
+/// L, R, C, LFE, side L, side R, back L, back R: fronts at 30 degrees, sides at 110, backs at 150.
+static constexpr std::array<Core::Vr::Vec3, 8> BED_SPEAKER_POSITIONS{{
+    {-0.500f, 0.0f, -0.866f},
+    {0.500f, 0.0f, -0.866f},
+    {0.0f, 0.0f, -1.0f},
+    {0.0f, 0.0f, -1.0f},
+    {-0.940f, 0.0f, 0.342f},
+    {0.940f, 0.0f, 0.342f},
+    {-0.500f, 0.0f, 0.866f},
+    {0.500f, 0.0f, 0.866f},
 }};
 
 static void ResetObject(ObjectState& obj) {
@@ -661,6 +678,16 @@ s32 PS4_SYSV_ABI sceAudio3dPortAdvance(const OrbisAudio3dPortId port_id) {
     port.mix_buffer.assign(out_samples, 0.0f);
     float* mix = port.mix_buffer.data();
 
+    // Titles place sound around the body; the head's turn within it is the system's to apply.
+    const Core::Vr::Quat to_head =
+        HeadTracking() != 0 ? Core::Vr::Conjugate(Core::Vr::Runtime::Instance().HeadOrientation())
+                            : Core::Vr::Quat{};
+    const auto place = [&](const Core::Vr::Vec3& position, const float gain, const float spread) {
+        const Core::Vr::Vec3 heard = Core::Vr::Rotate(to_head, position);
+        return ObjectPlacement{
+            .x = heard.x, .y = heard.y, .z = heard.z, .gain = gain, .spread = spread};
+    };
+
     // The bed is ordinary speaker audio and goes in as it is.
     if (!port.bed_queue.empty()) {
         AudioData data = port.bed_queue.front();
@@ -674,36 +701,50 @@ s32 PS4_SYSV_ABI sceAudio3dPortAdvance(const OrbisAudio3dPortId port_id) {
                           : reinterpret_cast<const float*>(data.sample_buffer)[at];
         };
         constexpr float Half = 0.7071f;
-        for (u32 i = 0; i < frames; i++) {
-            mix[i * 2 + 0] += sample(i, 0);
-            mix[i * 2 + 1] += sample(i, channels > 1 ? 1 : 0);
-        }
-        if (channels >= 6) {
-            // Centre (where dialogue usually is) and LFE reach both ears equally.
-            for (u32 i = 0; i < frames; i++) {
-                const float middle = sample(i, 2) * Half + sample(i, 3) * 0.5f;
-                mix[i * 2 + 0] += middle;
-                mix[i * 2 + 1] += middle;
-            }
+        if (HeadTracking() >= 2 && channels >= 6 && !MixdownEnabled()) {
             port.bed_channel.resize(frames);
-            for (u32 surround = 0; surround + 4 < channels && surround < 4; surround++) {
-                const u32 channel = surround + 4;
-                const u32 side = surround % 2;
-                if (MixdownEnabled()) {
-                    for (u32 i = 0; i < frames; i++) {
-                        mix[i * 2 + side] += sample(i, channel) * Half;
-                    }
-                    continue;
-                }
+            for (u32 channel = 0; channel < channels && channel < 8; channel++) {
                 for (u32 i = 0; i < frames; i++) {
                     port.bed_channel[i] = sample(i, channel);
                 }
-                const ObjectPlacement placement{.x = BED_SURROUND_POSITIONS[surround][0],
-                                                .z = BED_SURROUND_POSITIONS[surround][1],
-                                                .gain = 1.0f};
-                port.bed_surrounds[surround].Process(port.bed_channel.data(), frames, mix,
-                                                     placement,
-                                                     static_cast<float>(AUDIO3D_SAMPLE_RATE));
+                const float gain = channel == 3 ? 0.5f : channel == 2 ? Half : 1.0f;
+                port.bed_speakers[channel].Process(
+                    port.bed_channel.data(), frames, mix,
+                    place(BED_SPEAKER_POSITIONS[channel], gain, 0.0f),
+                    static_cast<float>(AUDIO3D_SAMPLE_RATE));
+            }
+        } else {
+            for (u32 i = 0; i < frames; i++) {
+                mix[i * 2 + 0] += sample(i, 0);
+                mix[i * 2 + 1] += sample(i, channels > 1 ? 1 : 0);
+            }
+            if (channels >= 6) {
+                // Centre (where dialogue usually is) and LFE reach both ears equally.
+                for (u32 i = 0; i < frames; i++) {
+                    const float middle = sample(i, 2) * Half + sample(i, 3) * 0.5f;
+                    mix[i * 2 + 0] += middle;
+                    mix[i * 2 + 1] += middle;
+                }
+                port.bed_channel.resize(frames);
+                for (u32 surround = 0; surround + 4 < channels && surround < 4; surround++) {
+                    const u32 channel = surround + 4;
+                    const u32 side = surround % 2;
+                    if (MixdownEnabled()) {
+                        for (u32 i = 0; i < frames; i++) {
+                            mix[i * 2 + side] += sample(i, channel) * Half;
+                        }
+                        continue;
+                    }
+                    for (u32 i = 0; i < frames; i++) {
+                        port.bed_channel[i] = sample(i, channel);
+                    }
+                    port.bed_speakers[channel].Process(
+                        port.bed_channel.data(), frames, mix,
+                        ObjectPlacement{.x = BED_SPEAKER_POSITIONS[channel].x,
+                                        .z = BED_SPEAKER_POSITIONS[channel].z,
+                                        .gain = 1.0f},
+                        static_cast<float>(AUDIO3D_SAMPLE_RATE));
+                }
             }
         }
         std::free(data.sample_buffer);
@@ -731,8 +772,9 @@ s32 PS4_SYSV_ABI sceAudio3dPortAdvance(const OrbisAudio3dPortId port_id) {
                 mix[i * 2 + 1] += obj.pcm[i] * gain;
             }
         } else {
-            ObjectPlacement placement = obj.placement;
-            placement.gain *= ObjectGain();
+            const ObjectPlacement placement =
+                place({obj.placement.x, obj.placement.y, obj.placement.z},
+                      obj.placement.gain * ObjectGain(), obj.placement.spread);
             obj.spatializer.Process(obj.pcm.data(), granularity, mix, placement,
                                     static_cast<float>(AUDIO3D_SAMPLE_RATE));
         }
@@ -755,14 +797,18 @@ s32 PS4_SYSV_ABI sceAudio3dPortAdvance(const OrbisAudio3dPortId port_id) {
                     extra += fmt::format("{:02x}", blob[i]);
                 }
             }
+            const ObjectPlacement heard =
+                place({obj.placement.x, obj.placement.y, obj.placement.z}, 0.0f, 0.0f);
             float peak = 0.0f;
             for (const float sample : obj.pcm) {
                 peak = std::max(peak, std::abs(sample));
             }
             LOG_INFO(Lib_Audio3d,
-                     "trace:   #{} pos ({:.2f}, {:.2f}, {:.2f}) gain {:.3f} spread {:.2f} "
-                     "priority {} passthrough {} ambisonic {} peak {:.3f}{}",
-                     obj_id, obj.placement.x, obj.placement.y, obj.placement.z,
+                     "trace:   #{} pos ({:.2f}, {:.2f}, {:.2f}) heard ({:.2f}, {:.2f}, {:.2f}) "
+                     "gain {:.3f} spread {:.2f} priority {} passthrough {} ambisonic {} peak "
+                     "{:.3f}{}",
+                     obj_id, obj.placement.x, obj.placement.y, obj.placement.z, heard.x, heard.y,
+                     heard.z,
                      obj.placement.gain, obj.placement.spread, obj.priority, obj.passthrough,
                      obj.ambisonic_channel, peak, extra);
         }

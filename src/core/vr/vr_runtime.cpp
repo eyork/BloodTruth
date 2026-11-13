@@ -932,6 +932,11 @@ DeviceState Runtime::DemoHead() const {
     return state;
 }
 
+Quat Runtime::HeadOrientation() const {
+    std::scoped_lock lock{mutex};
+    return head.sequence != 0 && title_asked ? head.pose.orientation : Quat{};
+}
+
 DeviceState Runtime::GetHead() {
     std::scoped_lock lock{mutex};
     if (head.sequence == 0) {

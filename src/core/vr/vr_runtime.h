@@ -279,6 +279,9 @@ public:
 
     // Guest side, tracker space.
     DeviceState GetHead();
+    /// Which way the head faces in tracker space, without taking stock of the seat the way a
+    /// title's first look does; straight ahead until the title has looked.
+    Quat HeadOrientation() const;
     DeviceState GetPad();
     /// Only a position tracked by the host; never synthesize a weapon pose from the head.
     DeviceState GetTrackedPad();

@@ -150,7 +150,7 @@ struct Port {
     // Working memory and state of the mix.
     std::vector<float> mix_buffer;
     std::vector<float> bed_channel;
-    std::array<Spatializer, 4> bed_surrounds;
+    std::array<Spatializer, 8> bed_speakers;
     float limiter_gain{1.0f};
     u64 advance_count{};
 };
