@@ -69,6 +69,8 @@ does not know about them; the first run after that compiles again.
 | Switch | Default | What it does |
 |---|---|---|
 | `SHADPS4_VIRTUAL_SURROUND` | on with a headset | renders the game's 7.1 mix for headphones (virtual speakers, limiter). `0` = plain fold to stereo |
+| `SHADPS4_AUDIO3D_MIXDOWN` | `0` | `1` plays every 3D sound object in both ears at its own level, with no direction or head shadow. Use it if voices or effects are hard to hear |
+| `SHADPS4_AUDIO3D_OBJECT_GAIN` | `1` | volume of the 3D sound objects (voices, effects) relative to the music/ambience bed, 0-8; e.g. `1.5` |
 | `SHADPS4_AUDIO3D_TRACE` | `0` | `1` logs where the loudest 3D sound objects are (needs `Lib.Audio3d:Info` in the log filter) |
 
 3D sound objects (voices, effects) are placed around the head with a head model (`audio3d.cpp`,

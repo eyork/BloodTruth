@@ -37,6 +37,25 @@ static bool TraceEnabled() {
     return enabled;
 }
 
+/// SHADPS4_AUDIO3D_MIXDOWN=1 plays every object in both ears at its own level, without direction.
+static bool MixdownEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_AUDIO3D_MIXDOWN");
+        return value != nullptr && *value != '\0' && *value != '0';
+    }();
+    return enabled;
+}
+
+/// SHADPS4_AUDIO3D_OBJECT_GAIN scales every object against the bed (default 1).
+static float ObjectGain() {
+    static const float gain = [] {
+        const char* value = std::getenv("SHADPS4_AUDIO3D_OBJECT_GAIN");
+        const float parsed = value != nullptr ? std::strtof(value, nullptr) : 1.0f;
+        return std::isfinite(parsed) && parsed > 0.0f ? std::min(parsed, 8.0f) : 1.0f;
+    }();
+    return gain;
+}
+
 static void ResetObject(ObjectState& obj) {
     obj.pcm.clear();
     obj.has_pcm = false;
@@ -667,14 +686,16 @@ s32 PS4_SYSV_ABI sceAudio3dPortAdvance(const OrbisAudio3dPortId port_id) {
             // of the sound and none of its direction.
             continue;
         }
-        if (obj.passthrough || obj.ambisonic_channel == 0) {
-            const float gain = obj.placement.gain;
+        if (obj.passthrough || obj.ambisonic_channel == 0 || MixdownEnabled()) {
+            const float gain = obj.placement.gain * ObjectGain();
             for (u32 i = 0; i < granularity; i++) {
                 mix[i * 2 + 0] += obj.pcm[i] * gain;
                 mix[i * 2 + 1] += obj.pcm[i] * gain;
             }
         } else {
-            obj.spatializer.Process(obj.pcm.data(), granularity, mix, obj.placement,
+            ObjectPlacement placement = obj.placement;
+            placement.gain *= ObjectGain();
+            obj.spatializer.Process(obj.pcm.data(), granularity, mix, placement,
                                     static_cast<float>(AUDIO3D_SAMPLE_RATE));
         }
         if (loudest == nullptr || obj.placement.gain > loudest->placement.gain) {
